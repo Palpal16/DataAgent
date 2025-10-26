@@ -38,6 +38,20 @@ DEFAULT_DATA_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data", "Store_Sales_Price_Elasticity_Promotions_Data.parquet"
 )
 
+def check_data_file() -> bool:
+    """Check if the default data file exists and print its path.
+    
+    Returns:
+        bool: True if file exists, False otherwise
+    """
+    print("DEFAULT_DATA_PATH: " + DEFAULT_DATA_PATH)
+    if not os.path.exists(DEFAULT_DATA_PATH):
+        print("The file does not exist")
+        return False
+    print("The file exists")
+    return True
+
+check_data_file()
 
 # -----------------------------
 # State Definition
@@ -94,7 +108,7 @@ def generate_sql_query(state: State, columns: List[str], table_name: str, llm: C
     )
 
 
-def lookup_sales_data(state: State, data_path: str, llm: ChatOllama) -> State:
+def lookup_sales_data(state: State, llm: ChatOllama) -> State:
     """Look up sales data from a parquet file using LLM-generated SQL over DuckDB.
 
     This function registers the parquet data as a temporary DuckDB table, asks the
@@ -103,7 +117,7 @@ def lookup_sales_data(state: State, data_path: str, llm: ChatOllama) -> State:
 
     Args:
         state: Conversation state; must include 'prompt'.
-        data_path: Filesystem path to the parquet dataset.
+        data_path: Filesystem path to the parquet dataset. // ADD LATER
         llm: ChatOllama instance used for prompt-to-SQL generation.
 
     Returns:
@@ -111,7 +125,7 @@ def lookup_sales_data(state: State, data_path: str, llm: ChatOllama) -> State:
     """
     try:
         table_name = "sales"
-        df = pd.read_parquet(data_path)
+        df = pd.read_parquet(DEFAULT_DATA_PATH)
         duckdb.sql("DROP TABLE IF EXISTS sales")
         duckdb.register("df", df)
         duckdb.sql(f"CREATE TABLE {table_name} AS SELECT * FROM df")
@@ -120,6 +134,7 @@ def lookup_sales_data(state: State, data_path: str, llm: ChatOllama) -> State:
         result_str = result_df.to_string(index=False)
         return {**state, "data": result_str}
     except Exception as e:
+        print(f"Error accessing data: {str(e)}")
         return {**state, "error": f"Error accessing data: {str(e)}"}
 
 
@@ -182,6 +197,8 @@ def decide_tool(state: State, llm: ChatOllama) -> State:
         elif len(state.get("answer", [])) > 1:
             matched_tool = "end"
 
+        print(f"Tool selected: {matched_tool}")
+
         return {
             **state,
             "prompt": current_prompt,
@@ -192,6 +209,7 @@ def decide_tool(state: State, llm: ChatOllama) -> State:
             "tool_choice": matched_tool,
         }
     except Exception as e:
+        print(f"Error deciding tool: {str(e)}")
         return {**state, "error": f"Error accessing data: {str(e)}"}
 
 
@@ -223,6 +241,7 @@ def analyzing_data(state: State, llm: ChatOllama) -> State:
             "answer": state.get("answer", []) + [analysis_text],
         }
     except Exception as e:
+        print(f"Error analyzing data: {str(e)}")
         return {**state, "error": f"Error accessing data: {str(e)}"}
 
 
@@ -347,6 +366,7 @@ def create_visualization(state: State, llm: ChatOllama) -> State:
             "answer": with_config.get("answer", []) + [code],
         }
     except Exception as e:
+        print(f"Error creating visualization: {str(e)}")
         return {**state, "error": f"Error accessing data: {str(e)}"}
 
 
@@ -383,6 +403,7 @@ class SalesDataAgent:
         max_tokens: int = 2000,
         streaming: bool = True,
         data_path: Optional[str] = None,
+        ollama_url: Optional[str] = None,
     ) -> None:
         """Initialize the agent and compile the graph.
 
@@ -392,9 +413,15 @@ class SalesDataAgent:
             max_tokens: Generation token limit.
             streaming: Whether to stream tokens from the LLM.
             data_path: Optional override for the parquet dataset path.
+            ollama_url: Optional override for Ollama base URL; defaults to OLLAMA_HOST or http://localhost:11434.
         """
+        self.ollama_url = ollama_url or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.llm = ChatOllama(
-            model=model, temperature=temperature, max_tokens=max_tokens, streaming=streaming
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            streaming=streaming,
+            base_url=self.ollama_url,
         )
         self.data_path = data_path or DEFAULT_DATA_PATH
         self.graph = self._build_graph()
@@ -412,26 +439,71 @@ class SalesDataAgent:
     def check_model(self):
         """Check if the model is running locally"""
         try:
-            requests.get("http://localhost:11434/api/version", timeout=3).json()
+            base = self.ollama_url.rstrip("/")
+            requests.get(f"{base}/api/version", timeout=3).json()
             print("Server is running locally")
             return self.check_ollama()
         except Exception as e:
             print(e)
             return False
 
+
     def _build_graph(self):
         """Construct and compile the LangGraph for the agent run loop."""
         graph = StateGraph(State)
 
         decide_tool_with_llm = partial(decide_tool, llm=self.llm)
-        lookup_with_ctx = partial(lookup_sales_data, data_path=self.data_path, llm=self.llm)
-        analyze_with_llm = partial(analyzing_data, llm=self.llm)
-        create_viz_with_llm = partial(create_visualization, llm=self.llm)
+
+        # Capture the LLM in closures so nodes accept only (state)
+        llm = self.llm
+
+        def lookup_sales_data_node(state: State) -> Dict:
+            try:
+                table_name = "sales"
+                df = pd.read_parquet(DEFAULT_DATA_PATH)
+                duckdb.sql("DROP TABLE IF EXISTS sales")
+                duckdb.register("df", df)
+                duckdb.sql(f"CREATE TABLE {table_name} AS SELECT * FROM df")
+                sql_query = generate_sql_query(state, df.columns.tolist(), table_name, llm)
+                result_df = duckdb.sql(sql_query).df()
+                result_str = result_df.to_string(index=False)
+                return {**state, "data": result_str}
+            except Exception as e:
+                print(f"Error accessing data: {str(e)}")
+                return {**state, "error": f"Error accessing data: {str(e)}"}
+
+        def analyzing_data_node(state: State) -> Dict:
+            try:
+                formatted_prompt = DATA_ANALYSIS_PROMPT.format(
+                    data=state.get("data", ""), prompt=state.get("prompt", "")
+                )
+                analysis_result = llm.invoke(formatted_prompt)
+                analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
+                return {
+                    **state,
+                    "analyze_data": analysis_text,
+                    "answer": state.get("answer", []) + [analysis_text],
+                }
+            except Exception as e:
+                print(f"Error analyzing data: {str(e)}")
+                return {**state, "error": f"Error accessing data: {str(e)}"}
+
+        def create_visualization_node(state: State) -> Dict:
+            try:
+                with_config = extract_chart_config(state, llm)
+                code = create_chart(with_config, llm)
+                return {
+                    **with_config,
+                    "answer": with_config.get("answer", []) + [code],
+                }
+            except Exception as e:
+                print(f"Error creating visualization: {str(e)}")
+                return {**state, "error": f"Error accessing data: {str(e)}"}
 
         graph.add_node("decide_tool", decide_tool_with_llm)
-        graph.add_node("lookup_sales_data", lookup_with_ctx)
-        graph.add_node("analyzing_data", analyze_with_llm)
-        graph.add_node("create_visualization", create_viz_with_llm)
+        graph.add_node("lookup_sales_data", lookup_sales_data_node)
+        graph.add_node("analyzing_data", analyzing_data_node)
+        graph.add_node("create_visualization", create_visualization_node)
         graph.set_entry_point("decide_tool")
 
         graph.add_conditional_edges(
@@ -448,7 +520,7 @@ class SalesDataAgent:
         graph.add_edge("lookup_sales_data", "decide_tool")
         graph.add_edge("analyzing_data", "decide_tool")
         graph.add_edge("create_visualization", "decide_tool")
-
+        
         return graph.compile()
 
     def run(self, prompt: str, *, visualization_goal: Optional[str] = None, initial_state: Optional[Dict] = None) -> Dict:
@@ -470,6 +542,7 @@ class SalesDataAgent:
             self.run_checked = self.check_model()
         
         if not self.run_checked:
+            print("Model is not running locally, remember to run ollama serve")
             return {**state, "error": "Model is not running locally, remember to run ollama serve"}
         else:
             if visualization_goal:
@@ -479,12 +552,15 @@ class SalesDataAgent:
             print("Running the graph...")
             return self.graph.invoke(state)
 
-    def draw_graph_ascii(self) -> str:
+    def draw_graph(self) -> str:
         """Return an ASCII rendering of the compiled graph if available."""
         try:
-            return self.graph.get_graph().print_ascii()
+            from IPython.display import Image, display
+            display(Image(self.graph.get_graph().draw_mermaid_png()))
+            return ""
         except Exception:
-            return "[graph visualization unavailable]"
+            # Fallback if mermaid is not available
+            return self.graph.get_graph().print_ascii()
 
 
 __all__ = ["SalesDataAgent", "State"]
@@ -497,9 +573,10 @@ if __name__ == "__main__":
     parser.add_argument("prompt", type=str, help="User prompt/question")
     parser.add_argument("--data", dest="data_path", type=str, default=None, help="Path to parquet file")
     parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional viz goal")
+    parser.add_argument("--model", dest="model", type=str, default="llama3.2", help="Ollama model name (e.g., llama3.2:3b)")
     args = parser.parse_args()
 
-    agent = SalesDataAgent(data_path=args.data_path)
+    agent = SalesDataAgent(model=args.model, data_path=args.data_path)
     output = agent.run(args.prompt, visualization_goal=args.visualization_goal)
     # Minimal printout
     print(json.dumps({k: v for k, v in output.items() if k != "data"}, indent=2))

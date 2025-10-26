@@ -1,0 +1,8 @@
+langgraph
+langchain-ollama
+duckdb
+pandas
+pyarrow
+matplotlib
+typing_extensions
+requests
