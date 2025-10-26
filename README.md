@@ -98,6 +98,50 @@ python -m Agent.data_agent "Top products by revenue" --data "C:\\path\\to\\your.
 
 ---
 
+## Run with Docker
+
+Build the image (from project root):
+```powershell
+docker build -t data-agent .
+```
+
+Build explicitly with this Dockerfile (if building from elsewhere):
+```powershell
+docker build -f Dockerfile -t data-agent .
+```
+
+Run (Docker Desktop on Windows/macOS):
+```powershell
+docker run --rm -e OLLAMA_HOST=http://host.docker.internal:11434 \
+  data-agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
+```
+
+Run (Linux host, replace with your host IP or network alias):
+```bash
+docker run --rm -e OLLAMA_HOST=http://192.168.1.10:11434 \
+  data-agent "Top products by revenue"
+```
+
+Use a custom parquet by mounting it over the default path inside the container:
+```powershell
+docker run --rm -e OLLAMA_HOST=http://host.docker.internal:11434 \
+  -v C:\\path\\to\\your.parquet:/app/data/Store_Sales_Price_Elasticity_Promotions_Data.parquet \
+  data-agent "Show weekly sales trend in 2021"
+```
+
+Override the entrypoint (run any Python you want inside the image):
+```powershell
+docker run --rm -it --entrypoint bash data-agent
+# inside the container:
+python -m Agent.data_agent "Top products by revenue" --goal "Top-5"
+```
+
+Notes:
+- The container expects an Ollama server to be reachable at `OLLAMA_HOST`.
+- Default `ENTRYPOINT` is `python -m Agent.data_agent`; any arguments after the image name are passed to the agent.
+
+---
+
 ## Configuration
 - Change model: pass `model="<name>"` to `SalesDataAgent(...)`.
 - Custom parquet: pass `data_path="..."` in the constructor, or use `--data` in CLI.
