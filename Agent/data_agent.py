@@ -29,6 +29,24 @@ from typing_extensions import NotRequired, TypedDict
 from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
 
+# Optional tracing/instrumentation (Phoenix / OpenInference)
+try:
+    from phoenix.otel import register as phoenix_register
+    from openinference.instrumentation.langchain import LangChainInstrumentor
+    from opentelemetry.trace import StatusCode
+    _PHOENIX_AVAILABLE = True
+except Exception:  # pragma: no cover - tracing is optional
+    StatusCode = None  # type: ignore
+    _PHOENIX_AVAILABLE = False
+    #print exception
+    print(Exception)
+
+
+# Mirror utils_0.py printing of langgraph version
+import langgraph
+import langgraph.version
+print(langgraph.version)
+
 
 # -----------------------------
 # Constants / Defaults
@@ -101,11 +119,13 @@ def generate_sql_query(state: State, columns: List[str], table_name: str, llm: C
     )
     response = llm.invoke(formatted_prompt)
     sql_query = response.content if hasattr(response, "content") else str(response)
-    return (
+    cleaned_sql = (
         sql_query.strip()
         .replace("```sql", "")
         .replace("```", "")
     )
+    print("Generated SQL Query:\n", cleaned_sql)
+    return cleaned_sql
 
 
 def lookup_sales_data(state: State, llm: ChatOllama) -> State:
@@ -138,7 +158,7 @@ def lookup_sales_data(state: State, llm: ChatOllama) -> State:
         return {**state, "error": f"Error accessing data: {str(e)}"}
 
 
-def decide_tool(state: State, llm: ChatOllama) -> State:
+def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
     """Select the next tool to run given the current conversation state.
 
     The LLM is prompted with the available tools and minimal state. The raw
@@ -197,6 +217,22 @@ def decide_tool(state: State, llm: ChatOllama) -> State:
         elif len(state.get("answer", [])) > 1:
             matched_tool = "end"
 
+        # Tracing span for tool choice (optional)
+        if tracer is not None:
+            try:
+                with tracer.start_as_current_span("tool_choice", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                    # Minimal, robust attributes to avoid dtype issues
+                    span.set_attributes({  # type: ignore[attr-defined]
+                        "prompt": str(current_prompt),
+                        "tool_choice": str(matched_tool),
+                    })
+                    span.set_input(str(current_prompt))  # type: ignore[attr-defined]
+                    span.set_output(str(matched_tool))  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
         print(f"Tool selected: {matched_tool}")
 
         return {
@@ -230,6 +266,7 @@ def analyzing_data(state: State, llm: ChatOllama) -> State:
         Updated state including 'analyze_data' and the analysis appended to 'answer'.
     """
     try:
+        print("Data to analyze:\n", state.get("data", ""))
         formatted_prompt = DATA_ANALYSIS_PROMPT.format(
             data=state.get("data", ""), prompt=state.get("prompt", "")
         )
@@ -316,6 +353,7 @@ def extract_chart_config(state: State, llm: ChatOllama) -> State:
     raw = response.content if hasattr(response, "content") else str(response)
     chart_config = _parse_chart_config(raw)
     chart_config["data"] = data_text
+    print("Este es el chart config: "+str(chart_config))
     return {**state, "chart_config": chart_config}
 
 
@@ -404,6 +442,10 @@ class SalesDataAgent:
         streaming: bool = True,
         data_path: Optional[str] = None,
         ollama_url: Optional[str] = None,
+        enable_tracing: bool = False,
+        phoenix_api_key: Optional[str] = None,
+        phoenix_endpoint: Optional[str] = None,
+        project_name: str = "evaluating-agent",
     ) -> None:
         """Initialize the agent and compile the graph.
 
@@ -424,6 +466,30 @@ class SalesDataAgent:
             base_url=self.ollama_url,
         )
         self.data_path = data_path or DEFAULT_DATA_PATH
+
+        # Optional Phoenix/OpenInference tracing integration
+        self.tracer = None
+        self.tracing_enabled = False
+        if enable_tracing and _PHOENIX_AVAILABLE:
+            try:
+                # Environment variables similar to utils_0.py
+                if phoenix_api_key:
+                    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = f"api_key={phoenix_api_key}"
+                    os.environ["PHOENIX_CLIENT_HEADERS"] = f"api_key={phoenix_api_key}"
+                if phoenix_endpoint:
+                    os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = phoenix_endpoint
+
+                tracer_provider = phoenix_register(
+                    project_name=project_name,
+                    endpoint=(phoenix_endpoint or "https://app.phoenix.arize.com/v1/traces"),
+                )
+                LangChainInstrumentor(tracer_provider=tracer_provider).instrument(skip_dep_check=True)
+                self.tracer = tracer_provider.get_tracer(__name__)
+                self.tracing_enabled = True
+            except Exception as _:
+                self.tracer = None
+                self.tracing_enabled = False
+
         self.graph = self._build_graph()
         self.run_checked = False
 
@@ -452,10 +518,11 @@ class SalesDataAgent:
         """Construct and compile the LangGraph for the agent run loop."""
         graph = StateGraph(State)
 
-        decide_tool_with_llm = partial(decide_tool, llm=self.llm)
+        decide_tool_with_llm = partial(decide_tool, llm=self.llm, tracer=self.tracer)
 
         # Capture the LLM in closures so nodes accept only (state)
         llm = self.llm
+        tracer = self.tracer
 
         def lookup_sales_data_node(state: State) -> Dict:
             try:
@@ -467,6 +534,15 @@ class SalesDataAgent:
                 sql_query = generate_sql_query(state, df.columns.tolist(), table_name, llm)
                 result_df = duckdb.sql(sql_query).df()
                 result_str = result_df.to_string(index=False)
+                if tracer is not None:
+                    try:
+                        with tracer.start_as_current_span("sql_query_exec", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                            span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
+                            span.set_output(result_str)  # type: ignore[attr-defined]
+                            if StatusCode is not None:
+                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                 return {**state, "data": result_str}
             except Exception as e:
                 print(f"Error accessing data: {str(e)}")
@@ -474,11 +550,21 @@ class SalesDataAgent:
 
         def analyzing_data_node(state: State) -> Dict:
             try:
+                print("Data to analyze:\n", state.get("data", ""))
                 formatted_prompt = DATA_ANALYSIS_PROMPT.format(
                     data=state.get("data", ""), prompt=state.get("prompt", "")
                 )
                 analysis_result = llm.invoke(formatted_prompt)
                 analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
+                if tracer is not None:
+                    try:
+                        with tracer.start_as_current_span("data_analysis", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                            span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
+                            span.set_output(str(analysis_text))  # type: ignore[attr-defined]
+                            if StatusCode is not None:
+                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                 return {
                     **state,
                     "analyze_data": analysis_text,
@@ -492,6 +578,15 @@ class SalesDataAgent:
             try:
                 with_config = extract_chart_config(state, llm)
                 code = create_chart(with_config, llm)
+                if tracer is not None:
+                    try:
+                        with tracer.start_as_current_span("gen_visualization", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                            span.set_input(str(state.get("prompt", "")))  # type: ignore[attr-defined]
+                            span.set_output(str(code))  # type: ignore[attr-defined]
+                            if StatusCode is not None:
+                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                 return {
                     **with_config,
                     "answer": with_config.get("answer", []) + [code],
@@ -550,7 +645,25 @@ class SalesDataAgent:
             if initial_state:
                 state.update(initial_state)
             print("Running the graph...")
-            return self.graph.invoke(state)
+            if self.tracing_enabled and self.tracer is not None:
+                try:
+                    with self.tracer.start_as_current_span("AgentRun", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                        print("[LangGraph] Starting LangGraph execution with tracing")
+                        span.set_input(state)  # type: ignore[attr-defined]
+                        result = self.graph.invoke(state)
+                        span.set_output(result)  # type: ignore[attr-defined]
+                        if StatusCode is not None:
+                            span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                        print("[LangGraph] LangGraph execution completed")
+                        return result
+                except Exception:
+                    # Fallback to non-traced execution on any tracing error
+                    return self.graph.invoke(state)
+            else:
+                print("[LangGraph] Starting LangGraph execution")
+                result = self.graph.invoke(state)
+                print("[LangGraph] LangGraph execution completed")
+                return result
 
     def draw_graph(self) -> str:
         """Return an ASCII rendering of the compiled graph if available."""
