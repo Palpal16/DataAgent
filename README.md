@@ -86,6 +86,72 @@ if result.get("chart_config") and result.get("answer"):
     exec(result["answer"][-1], globals(), locals())
 ```
 
+---
+
+## Tracing with Phoenix (optional)
+
+You can enable OpenInference/Phoenix tracing to visualize your agent runs (spans like AgentRun, tool_choice, sql_query_exec, data_analysis, gen_visualization).
+
+### 1) Install tracing dependencies
+```powershell
+pip install phoenix openinference-instrumentation-langchain opentelemetry-api
+```
+
+### 2) Choose where to send traces
+- Self-hosted Phoenix (local): set endpoint to `http://localhost:6006/v1/traces`
+- Phoenix Cloud: use endpoint `https://app.phoenix.arize.com/v1/traces` and your API key
+
+### 3) Start Phoenix locally (self-hosted) (Only if running locally)
+```powershell
+phoenix serve
+# or explicitly
+# phoenix serve --host 0.0.0.0 --port 6006
+```
+
+Open the UI at `http://localhost:6006`.
+
+### 4) Enable tracing in SalesDataAgent
+```python
+from Agent.data_agent import SalesDataAgent
+
+# Self-hosted example
+agent = SalesDataAgent(
+    enable_tracing=True,
+    phoenix_endpoint="http://localhost:6006/v1/traces",
+    project_name="evaluating-agent",
+)
+
+# Cloud example
+# agent = SalesDataAgent(
+#     enable_tracing=True,
+#     phoenix_endpoint="https://app.phoenix.arize.com/v1/traces",
+#     phoenix_api_key="<YOUR_API_KEY>",
+#     project_name="evaluating-agent",
+# )
+
+ret = agent.run("What was the most popular product SKU?")
+```
+
+Alternatively, set the endpoint via environment variable before creating the agent:
+```python
+import os
+os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = "http://localhost:6006/v1/traces"
+from Agent.data_agent import SalesDataAgent
+agent = SalesDataAgent(enable_tracing=True)
+```
+
+### 5) View your traces
+- Self-hosted UI: open `http://localhost:6006`, go to Traces, select the project (default: `evaluating-agent`).
+- Cloud UI: open `https://app.phoenix.arize.com`, Traces → select your project.
+
+You should see spans named: `AgentRun`, `tool_choice`, `sql_query_exec`, `data_analysis`, `gen_visualization`.
+
+### Troubleshooting tracing
+- Verify the console shows: `[LangGraph] Starting LangGraph execution with tracing`.
+- Confirm the endpoint includes `/v1/traces` and is reachable.
+- Make sure dependencies are installed: `phoenix`, `openinference-instrumentation-langchain`, `opentelemetry-api`.
+- For Cloud, ensure `phoenix_api_key` is set and valid.
+
 ### From the command line
 ```powershell
 python -m Agent.data_agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
