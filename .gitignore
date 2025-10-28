@@ -1,2 +1,5 @@
-shared.txt
-__pycache__/
+**/.DS_Store
+
+**/.vscode
+
+.gitignore
