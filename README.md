@@ -162,6 +162,47 @@ You can override the parquet path:
 python -m Agent.data_agent "Top products by revenue" --data "C:\\path\\to\\your.parquet"
 ```
 
+### Optional: Evaluate results with a C++ comparator
+
+Build the comparator (requires CMake):
+```powershell
+cd cpp_evaluator
+cmake -S . -B build -G "Ninja"  # or "Visual Studio 17 2022" on Windows
+cmake --build build --config Release
+```
+
+Run the agent and compare the produced table with an expected CSV:
+```powershell
+python -m Agent.data_agent "Weekly sales in 2021" \
+  --goal "Weekly trend" \
+  --expected-csv C:\\path\\to\\expected.csv \
+  --evaluator-exe .\\cpp_evaluator\\build\\resultcmp.exe \
+  --eval-keys week,store_id --eval-float-rel 1e-6 --eval-float-abs 1e-8
+```
+
+PowerShell example with backtick continuations:
+```powershell
+python -m Agent.data_agent "Weekly sales in 2021" `
+  --goal "Weekly trend" `
+  --model "llama3.2:3b" `
+  --expected-csv C:\path\to\expected.csv `
+  --evaluator-exe .\cpp_evaluator\build\resultcmp.exe `
+  --eval-keys week,store_id --eval-float-rel 1e-6 --eval-float-abs 1e-8
+```
+
+The final returned dict will include an `evaluation` field like:
+```json
+{
+  "equal": true,
+  "row_count_actual": 1245,
+  "row_count_expected": 1245,
+  "mismatched_rows": 0,
+  "mismatched_columns": [],
+  "duration_ms": 37,
+  "exit_code": 0
+}
+```
+
 ---
 
 ## Run with Docker

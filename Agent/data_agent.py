@@ -29,6 +29,12 @@ from typing_extensions import NotRequired, TypedDict
 from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
 
+# Optional C++ evaluator bridge
+try:
+    from evaluator import evaluate_table_str_against_expected
+except Exception:
+    evaluate_table_str_against_expected = None  # type: ignore
+
 # Optional tracing/instrumentation (Phoenix / OpenInference)
 try:
     from phoenix.otel import register as phoenix_register
@@ -618,7 +624,20 @@ class SalesDataAgent:
         
         return graph.compile()
 
-    def run(self, prompt: str, *, visualization_goal: Optional[str] = None, initial_state: Optional[Dict] = None) -> Dict:
+    def run(
+        self,
+        prompt: str,
+        *,
+        visualization_goal: Optional[str] = None,
+        initial_state: Optional[Dict] = None,
+        expected_csv: Optional[str] = None,
+        evaluator_exe: Optional[str] = None,
+        eval_keys: Optional[List[str]] = None,
+        eval_float_abs: float = 1e-8,
+        eval_float_rel: float = 1e-6,
+        eval_case_insensitive: bool = False,
+        only_lookup: bool = False,
+    ) -> Dict:
         """Execute the agent for a single prompt.
 
         Args:
@@ -644,6 +663,28 @@ class SalesDataAgent:
                 state["visualization_goal"] = visualization_goal
             if initial_state:
                 state.update(initial_state)
+            # Shortcut: run only the lookup tool
+            if only_lookup:
+                print("[Agent] Running only lookup_sales_data")
+                try:
+                    result = lookup_sales_data(state, self.llm)
+                except Exception as _e:
+                    return {**state, "error": f"Lookup failed: {str(_e)}"}
+                if expected_csv and evaluate_table_str_against_expected and result.get("data"):
+                    try:
+                        report = evaluate_table_str_against_expected(
+                            table_text=result.get("data", ""),
+                            expected_csv_path=expected_csv,
+                            evaluator_exe=evaluator_exe,
+                            keys=eval_keys,
+                            float_abs=eval_float_abs,
+                            float_rel=eval_float_rel,
+                            case_insensitive=eval_case_insensitive,
+                        )
+                        result = {**result, "evaluation": report}
+                    except Exception as _e:
+                        result = {**result, "evaluation": {"equal": False, "error": str(_e)}}
+                return result
             print("Running the graph...")
             if self.tracing_enabled and self.tracer is not None:
                 try:
@@ -651,6 +692,21 @@ class SalesDataAgent:
                         print("[LangGraph] Starting LangGraph execution with tracing")
                         span.set_input(state)  # type: ignore[attr-defined]
                         result = self.graph.invoke(state)
+                        # Optional external evaluation
+                        if expected_csv and evaluate_table_str_against_expected and result.get("data"):
+                            try:
+                                report = evaluate_table_str_against_expected(
+                                    table_text=result.get("data", ""),
+                                    expected_csv_path=expected_csv,
+                                    evaluator_exe=evaluator_exe,
+                                    keys=eval_keys,
+                                    float_abs=eval_float_abs,
+                                    float_rel=eval_float_rel,
+                                    case_insensitive=eval_case_insensitive,
+                                )
+                                result = {**result, "evaluation": report}
+                            except Exception as _e:
+                                result = {**result, "evaluation": {"equal": False, "error": str(_e)}}
                         span.set_output(result)  # type: ignore[attr-defined]
                         if StatusCode is not None:
                             span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
@@ -658,10 +714,39 @@ class SalesDataAgent:
                         return result
                 except Exception:
                     # Fallback to non-traced execution on any tracing error
-                    return self.graph.invoke(state)
+                    result = self.graph.invoke(state)
+                    if expected_csv and evaluate_table_str_against_expected and result.get("data"):
+                        try:
+                            report = evaluate_table_str_against_expected(
+                                table_text=result.get("data", ""),
+                                expected_csv_path=expected_csv,
+                                evaluator_exe=evaluator_exe,
+                                keys=eval_keys,
+                                float_abs=eval_float_abs,
+                                float_rel=eval_float_rel,
+                                case_insensitive=eval_case_insensitive,
+                            )
+                            result = {**result, "evaluation": report}
+                        except Exception as _e:
+                            result = {**result, "evaluation": {"equal": False, "error": str(_e)}}
+                    return result
             else:
                 print("[LangGraph] Starting LangGraph execution")
                 result = self.graph.invoke(state)
+                if expected_csv and evaluate_table_str_against_expected and result.get("data"):
+                    try:
+                        report = evaluate_table_str_against_expected(
+                            table_text=result.get("data", ""),
+                            expected_csv_path=expected_csv,
+                            evaluator_exe=evaluator_exe,
+                            keys=eval_keys,
+                            float_abs=eval_float_abs,
+                            float_rel=eval_float_rel,
+                            case_insensitive=eval_case_insensitive,
+                        )
+                        result = {**result, "evaluation": report}
+                    except Exception as _e:
+                        result = {**result, "evaluation": {"equal": False, "error": str(_e)}}
                 print("[LangGraph] LangGraph execution completed")
                 return result
 
@@ -687,10 +772,30 @@ if __name__ == "__main__":
     parser.add_argument("--data", dest="data_path", type=str, default=None, help="Path to parquet file")
     parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional viz goal")
     parser.add_argument("--model", dest="model", type=str, default="llama3.2", help="Ollama model name (e.g., llama3.2:3b)")
+    # Optional evaluation flags
+    parser.add_argument("--expected-csv", dest="expected_csv", type=str, default=None, help="Path to expected CSV for evaluation")
+    parser.add_argument("--evaluator-exe", dest="evaluator_exe", type=str, default=None, help="Path to C++ comparator executable")
+    parser.add_argument("--eval-keys", dest="eval_keys", type=str, default=None, help="Comma-separated key columns for row matching")
+    parser.add_argument("--eval-float-abs", dest="eval_float_abs", type=float, default=1e-8, help="Absolute tolerance for floats")
+    parser.add_argument("--eval-float-rel", dest="eval_float_rel", type=float, default=1e-6, help="Relative tolerance for floats")
+    parser.add_argument("--eval-case-insensitive", dest="eval_case_insensitive", action="store_true", help="Case-insensitive string comparison")
+    # Only-lookup flag
+    parser.add_argument("--lookup-only", dest="lookup_only", action="store_true", help="Run only the lookup_sales_data tool")
     args = parser.parse_args()
 
     agent = SalesDataAgent(model=args.model, data_path=args.data_path)
-    output = agent.run(args.prompt, visualization_goal=args.visualization_goal)
+    keys = args.eval_keys.split(",") if args.eval_keys else None
+    output = agent.run(
+        args.prompt,
+        visualization_goal=args.visualization_goal,
+        expected_csv=args.expected_csv,
+        evaluator_exe=args.evaluator_exe,
+        eval_keys=keys,
+        eval_float_abs=args.eval_float_abs,
+        eval_float_rel=args.eval_float_rel,
+        eval_case_insensitive=args.eval_case_insensitive,
+        only_lookup=args.lookup_only,
+    )
     # Minimal printout
     print(json.dumps({k: v for k, v in output.items() if k != "data"}, indent=2))
 
