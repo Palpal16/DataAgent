@@ -1,6 +1,6 @@
 ## Sales Data Agent
 
-An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes the results, and generates visualization code. It uses a LangGraph workflow and an Ollama-hosted model (default: `llama3.2`).
+An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes the results, and generates visualization code. It uses a LangGraph workflow and an Ollama-hosted model (default: `llama3.2:3b`).
 
 ### What it does
 - Lookup: converts natural language into SQL via the LLM and runs it on DuckDB over the parquet file at `data/Store_Sales_Price_Elasticity_Promotions_Data.parquet`.
@@ -11,7 +11,7 @@ An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes 
 
 ## Requirements
 - Python 3.10+
-- Ollama running locally (`https://ollama.com`) with a model pulled (default: `llama3.2`)
+- Ollama running locally (`https://ollama.com`) with a model pulled (default: `llama3.2:3b`)
 - Parquet file present at `data/Store_Sales_Price_Elasticity_Promotions_Data.parquet`
 
 Install Python deps (from the project root):
@@ -25,9 +25,9 @@ pip install langgraph langchain-ollama duckdb pandas pyarrow matplotlib
 
 1) Install Ollama for your OS from `https://ollama.com/download`.
 
-2) Pull a model (default used in code is `llama3.2`):
+2) Pull a model (default used in code is `llama3.2:3b`):
 ```powershell
-ollama pull llama3.2
+ollama pull llama3.2:3b
 ```
 
 3) Start the Ollama server (keeps API on `http://localhost:11434`):
@@ -66,7 +66,7 @@ DataAgent/
 from Agent.data_agent import SalesDataAgent
 
 agent = SalesDataAgent(
-    model="llama3.2",
+    model="llama3.2:3b",
     temperature=0.1,
     max_tokens=2000,
     streaming=True,
@@ -94,7 +94,7 @@ You can enable OpenInference/Phoenix tracing to visualize your agent runs (spans
 
 ### 1) Install tracing dependencies
 ```powershell
-pip install phoenix openinference-instrumentation-langchain opentelemetry-api
+pip install arize-phoenix openinference-instrumentation-langchain opentelemetry-api
 ```
 
 ### 2) Choose where to send traces
@@ -159,24 +159,26 @@ python -m Agent.data_agent "Show me the sales in Nov 2021" --goal "Sales trend f
 
 You can override the parquet path:
 ```powershell
-python -m Agent.data_agent "Top products by revenue" --data "C:\\path\\to\\your.parquet"
+python -m Agent.data_agent "Top products by revenue" --data "C:\path\to\your.parquet"
 ```
+---
 
-### Optional: Evaluate results with a C++ comparator
+## Optional: Evaluate results with a C++ comparator
 
 Build the comparator (requires CMake):
 ```powershell
 cd cpp_evaluator
 cmake -S . -B build -G "Ninja"  # or "Visual Studio 17 2022" on Windows
 cmake --build build --config Release
+cd ..
 ```
 
 Run the agent and compare the produced table with an expected CSV:
 ```powershell
 python -m Agent.data_agent "Weekly sales in 2021" \
   --goal "Weekly trend" \
-  --expected-csv C:\\path\\to\\expected.csv \
-  --evaluator-exe .\\cpp_evaluator\\build\\resultcmp.exe \
+  --expected-csv C:\path\to\expected.csv \
+  --evaluator-exe .\cpp_evaluator\build\resultcmp.exe \
   --eval-keys week,store_id --eval-float-rel 1e-6 --eval-float-abs 1e-8
 ```
 
@@ -232,7 +234,7 @@ docker run --rm -e OLLAMA_HOST=http://192.168.1.10:11434 \
 Use a custom parquet by mounting it over the default path inside the container:
 ```powershell
 docker run --rm -e OLLAMA_HOST=http://host.docker.internal:11434 \
-  -v C:\\path\\to\\your.parquet:/app/data/Store_Sales_Price_Elasticity_Promotions_Data.parquet \
+  -v C:\path\to\your.parquet:/app/data/Store_Sales_Price_Elasticity_Promotions_Data.parquet \
   data-agent "Show weekly sales trend in 2021"
 ```
 
@@ -260,7 +262,7 @@ Notes:
 - Check Ollama is up:
   - `curl http://localhost:11434/api/version`
   - `ollama list` and `ollama ps`
-- Ensure the model is pulled (e.g., `ollama pull llama3.2`).
+- Ensure the model is pulled (e.g., `ollama pull llama3.2:3b`).
 - If you see connection errors, confirm no firewall is blocking `localhost:11434`.
 - If SQL fails, skim the printed `data`/columns and adjust the prompt (e.g., include date formatting hints like `CAST(date_col AS VARCHAR)`).
 

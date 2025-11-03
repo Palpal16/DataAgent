@@ -90,6 +90,7 @@ class State(TypedDict):
     chart_config: Optional[dict]
     tool_choice: NotRequired[str]
     error: NotRequired[str]
+    sql_query: Optional[str]
 
 
 # -----------------------------
@@ -133,8 +134,7 @@ def generate_sql_query(state: State, columns: List[str], table_name: str, llm: C
     print("Generated SQL Query:\n", cleaned_sql)
     return cleaned_sql
 
-
-def lookup_sales_data(state: State, llm: ChatOllama) -> State:
+def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
     """Look up sales data from a parquet file using LLM-generated SQL over DuckDB.
 
     This function registers the parquet data as a temporary DuckDB table, asks the
@@ -158,11 +158,19 @@ def lookup_sales_data(state: State, llm: ChatOllama) -> State:
         sql_query = generate_sql_query(state, df.columns.tolist(), table_name, llm)
         result_df = duckdb.sql(sql_query).df()
         result_str = result_df.to_string(index=False)
-        return {**state, "data": result_str}
+        if tracer is not None:
+            try:
+                with tracer.start_as_current_span("sql_query_exec", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                    span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
+                    span.set_output(result_str)  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return {**state, "data": result_str, "sql_query": sql_query}
     except Exception as e:
         print(f"Error accessing data: {str(e)}")
         return {**state, "error": f"Error accessing data: {str(e)}"}
-
 
 def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
     """Select the next tool to run given the current conversation state.
@@ -259,34 +267,6 @@ DATA_ANALYSIS_PROMPT = (
     "Analyze the following data: {data}\n"
     "Your job is to answer the following question: {prompt}"
 )
-
-
-def analyzing_data(state: State, llm: ChatOllama) -> State:
-    """Ask the LLM to analyze the looked-up data in the context of the prompt.
-
-    Args:
-        state: Conversation state; should include 'data' and 'prompt'.
-        llm: ChatOllama instance used for the analysis.
-
-    Returns:
-        Updated state including 'analyze_data' and the analysis appended to 'answer'.
-    """
-    try:
-        print("Data to analyze:\n", state.get("data", ""))
-        formatted_prompt = DATA_ANALYSIS_PROMPT.format(
-            data=state.get("data", ""), prompt=state.get("prompt", "")
-        )
-        analysis_result = llm.invoke(formatted_prompt)
-        analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
-        return {
-            **state,
-            "analyze_data": analysis_text,
-            "answer": state.get("answer", []) + [analysis_text],
-        }
-    except Exception as e:
-        print(f"Error analyzing data: {str(e)}")
-        return {**state, "error": f"Error accessing data: {str(e)}"}
-
 
 CHART_CONFIGURATION_PROMPT = (
     "Return a compact JSON object describing a chart configuration to visualize the data.\n"
@@ -442,7 +422,7 @@ class SalesDataAgent:
     def __init__(
         self,
         *,
-        model: str = "llama3.2",
+        model: str = "llama3.2:3b",
         temperature: float = 0.1,
         max_tokens: int = 2000,
         streaming: bool = True,
@@ -524,37 +504,20 @@ class SalesDataAgent:
         """Construct and compile the LangGraph for the agent run loop."""
         graph = StateGraph(State)
 
-        decide_tool_with_llm = partial(decide_tool, llm=self.llm, tracer=self.tracer)
-
         # Capture the LLM in closures so nodes accept only (state)
         llm = self.llm
         tracer = self.tracer
 
-        def lookup_sales_data_node(state: State) -> Dict:
-            try:
-                table_name = "sales"
-                df = pd.read_parquet(DEFAULT_DATA_PATH)
-                duckdb.sql("DROP TABLE IF EXISTS sales")
-                duckdb.register("df", df)
-                duckdb.sql(f"CREATE TABLE {table_name} AS SELECT * FROM df")
-                sql_query = generate_sql_query(state, df.columns.tolist(), table_name, llm)
-                result_df = duckdb.sql(sql_query).df()
-                result_str = result_df.to_string(index=False)
-                if tracer is not None:
-                    try:
-                        with tracer.start_as_current_span("sql_query_exec", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
-                            span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
-                            span.set_output(result_str)  # type: ignore[attr-defined]
-                            if StatusCode is not None:
-                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-                return {**state, "data": result_str}
-            except Exception as e:
-                print(f"Error accessing data: {str(e)}")
-                return {**state, "error": f"Error accessing data: {str(e)}"}
-
         def analyzing_data_node(state: State) -> Dict:
+            """Ask the LLM to analyze the looked-up data in the context of the prompt.
+
+            Args:
+                state: Conversation state; should include 'data' and 'prompt'.
+                llm: ChatOllama instance used for the analysis.
+
+            Returns:
+                Updated state including 'analyze_data' and the analysis appended to 'answer'.
+            """
             try:
                 print("Data to analyze:\n", state.get("data", ""))
                 formatted_prompt = DATA_ANALYSIS_PROMPT.format(
@@ -581,6 +544,15 @@ class SalesDataAgent:
                 return {**state, "error": f"Error accessing data: {str(e)}"}
 
         def create_visualization_node(state: State) -> Dict:
+            """Create a visualization by first extracting config and then generating code.
+
+            Args:
+                state: Conversation state; should include 'data'.
+                llm: ChatOllama instance used for config extraction and code generation.
+
+            Returns:
+                Updated state with 'chart_config' and the generated code appended to 'answer'.
+            """
             try:
                 with_config = extract_chart_config(state, llm)
                 code = create_chart(with_config, llm)
@@ -601,8 +573,8 @@ class SalesDataAgent:
                 print(f"Error creating visualization: {str(e)}")
                 return {**state, "error": f"Error accessing data: {str(e)}"}
 
-        graph.add_node("decide_tool", decide_tool_with_llm)
-        graph.add_node("lookup_sales_data", lookup_sales_data_node)
+        graph.add_node("decide_tool", partial(decide_tool, llm=llm, tracer=tracer))
+        graph.add_node("lookup_sales_data", partial(lookup_sales_data, llm=llm, tracer=tracer))
         graph.add_node("analyzing_data", analyzing_data_node)
         graph.add_node("create_visualization", create_visualization_node)
         graph.set_entry_point("decide_tool")
@@ -769,9 +741,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run the Sales Data Agent")
     parser.add_argument("prompt", type=str, help="User prompt/question")
-    parser.add_argument("--data", dest="data_path", type=str, default=None, help="Path to parquet file")
+    parser.add_argument("--data", dest="data_path", type=str, default=DEFAULT_DATA_PATH, help="Path to parquet file")
     parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional viz goal")
-    parser.add_argument("--model", dest="model", type=str, default="llama3.2", help="Ollama model name (e.g., llama3.2:3b)")
+    parser.add_argument("--model", dest="model", type=str, default="llama3.2:3b", help="Ollama model name (e.g., llama3.2:3b)")
     # Optional evaluation flags
     parser.add_argument("--expected-csv", dest="expected_csv", type=str, default=None, help="Path to expected CSV for evaluation")
     parser.add_argument("--evaluator-exe", dest="evaluator_exe", type=str, default=None, help="Path to C++ comparator executable")
