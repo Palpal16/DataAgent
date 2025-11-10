@@ -609,6 +609,7 @@ class SalesDataAgent:
         eval_float_rel: float = 1e-6,
         eval_case_insensitive: bool = False,
         only_lookup: bool = False,
+        eval_stream_debug: bool = False,
     ) -> Dict:
         """Execute the agent for a single prompt.
 
@@ -652,6 +653,7 @@ class SalesDataAgent:
                             float_abs=eval_float_abs,
                             float_rel=eval_float_rel,
                             case_insensitive=eval_case_insensitive,
+                            stream_debug=eval_stream_debug,
                         )
                         result = {**result, "evaluation": report}
                     except Exception as _e:
@@ -675,6 +677,7 @@ class SalesDataAgent:
                                     float_abs=eval_float_abs,
                                     float_rel=eval_float_rel,
                                     case_insensitive=eval_case_insensitive,
+                                    stream_debug=eval_stream_debug,
                                 )
                                 result = {**result, "evaluation": report}
                             except Exception as _e:
@@ -697,6 +700,7 @@ class SalesDataAgent:
                                 float_abs=eval_float_abs,
                                 float_rel=eval_float_rel,
                                 case_insensitive=eval_case_insensitive,
+                                stream_debug=eval_stream_debug,
                             )
                             result = {**result, "evaluation": report}
                         except Exception as _e:
@@ -715,6 +719,7 @@ class SalesDataAgent:
                             float_abs=eval_float_abs,
                             float_rel=eval_float_rel,
                             case_insensitive=eval_case_insensitive,
+                            stream_debug=eval_stream_debug,
                         )
                         result = {**result, "evaluation": report}
                     except Exception as _e:
@@ -753,6 +758,8 @@ if __name__ == "__main__":
     parser.add_argument("--eval-case-insensitive", dest="eval_case_insensitive", action="store_true", help="Case-insensitive string comparison")
     # Only-lookup flag
     parser.add_argument("--lookup-only", dest="lookup_only", action="store_true", help="Run only the lookup_sales_data tool")
+    # Stream comparator debug (stderr) to terminal
+    parser.add_argument("--eval-stream-debug", dest="eval_stream_debug", action="store_true", help="Stream C++ comparator debug output to terminal")
     args = parser.parse_args()
 
     agent = SalesDataAgent(model=args.model, data_path=args.data_path)
@@ -767,6 +774,7 @@ if __name__ == "__main__":
         eval_float_rel=args.eval_float_rel,
         eval_case_insensitive=args.eval_case_insensitive,
         only_lookup=args.lookup_only,
+        eval_stream_debug=args.eval_stream_debug,
     )
     # Minimal printout
     print(json.dumps({k: v for k, v in output.items() if k != "data"}, indent=2))

@@ -6,6 +6,8 @@
 shared.txt
 out/
 cpp_evaluator/out/
+build/
+cplusplus/
 
 cpp_evaluator/build/
 
