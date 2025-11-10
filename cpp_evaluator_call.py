@@ -58,8 +58,8 @@ def run_cpp_comparator_fixed(actual_csv: str, expected_csv: str, keys=None, exe_
 
 if __name__ == '__main__':
 
-    PREFIX = "claude" # options: 'my', 'claude', 'gpt'
-    index = 1
+    PREFIX = "gpt" # options: 'my', 'claude', 'gpt'
+    index = 4
     path_gt = f"evaluation/csv_queries/{PREFIX}_{index}_gt.csv"
     path_gen = f"evaluation/csv_queries/{PREFIX}_{index}_gen.csv"
     print(f"Comparing {path_gt} and {path_gen} with keys ['week', 'store_id']")
