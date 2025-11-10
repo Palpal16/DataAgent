@@ -3,9 +3,10 @@
 **/.vscode
 **/__pycache__/
 
-.gitignore
 shared.txt
 out/
 cpp_evaluator/out/
 
 cpp_evaluator/build/
+
+loop.py

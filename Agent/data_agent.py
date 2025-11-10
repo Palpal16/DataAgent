@@ -157,7 +157,7 @@ def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
         duckdb.sql(f"CREATE TABLE {table_name} AS SELECT * FROM df")
         sql_query = generate_sql_query(state, df.columns.tolist(), table_name, llm)
         result_df = duckdb.sql(sql_query).df()
-        result_str = result_df.to_string(index=False)
+        result_str = result_df.to_string()
         if tracer is not None:
             try:
                 with tracer.start_as_current_span("sql_query_exec", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]

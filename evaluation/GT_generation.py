@@ -2,23 +2,91 @@ import duckdb
 import pandas as pd
 import json
 import os
+import csv
+from typing import Dict, List, Tuple
 
-agent_questions = [
-    "What was the most popular product SKU?",
-    "What was the total revenue across all stores?",
-    "Which store had the highest sales volume?",
-    "Create a bar chart showing total sales by store",
-    "What was the average transaction value?",
-    "Retrieve the sales made in November 2021 and December 2021 and tell me when more money were earned?",
-    "Show me the sales in Nov 2021",
-    "Collect sales data for December 2021 and tell which day had the highest sales?",
-    "How many products were sold for a promo in May 2023?",
-    "Weekly sales in 2021"
-]
+
+PREFIX = 'gpt' #options: 'my', 'claude', 'gpt'
 
 TRANSACTION_DATA_FILE_PATH = 'data/Store_Sales_Price_Elasticity_Promotions_Data.parquet'
-DATASET_FILE_PATH = 'evaluation/query_dataset.json'
+DATASET_FILE_PATH = f"evaluation/{PREFIX}_dataset.json"
 table_name = "sales"
+
+queries = {
+    'my': [
+        "What was the most popular product SKU?",
+        "What was the total revenue across all stores?",
+        "Which store had the highest sales volume?",
+        "Create a bar chart showing total sales by store",
+        "What was the average transaction value?",
+        "Retrieve the sales made in November 2021 and December 2021 and tell me when more money were earned?",
+        "Show me the sales in Nov 2021",
+        "Collect sales data for December 2021 and tell which day had the highest sales?",
+        "How many products were sold for a promo in May 2023?",
+        "Weekly sales in 2021",
+        "Extract the first and last sale in time order"
+    ],
+    'claude': [
+        "What are the total sales and quantity sold for each store in 2023?",
+        "Which 20 SKUs had the highest total sales value between January 2022 and December 2022?",
+        "How many sales transactions occurred in each month of 2023?",
+        "What is the average sale value for each product class code that has more than 100 transactions?",
+        "Show all sales from store number 1980 where the quantity sold was greater than 5",
+        "List all sales that were on promotion in March 2024",
+        "Which stores made sales with a total sale value above $100 in Q1 2022?",
+        "What are the top 15 stores by total quantity sold in 2022?",
+        "Show the daily total sales value for store 2970 in February 2024",
+        "Which 25 product class codes had the most promotional sales in 2023?"
+    ],
+    'gpt' : [
+        "Return the 12 months of 2023 with total revenue and total units sold; columns: month_start, total_revenue, total_units; order by month_start ASC.",
+        "Return the top 20 SKUs by total units sold across the full dataset; tie-break by higher total revenue, then SKU_Coded ASC; columns: SKU_Coded, total_units, total_revenue.",
+        "For 2022, return the top 15 Product_Class_Code by total revenue; tie-break by higher total units, then Product_Class_Code ASC; columns: Product_Class_Code, total_revenue, total_units.",
+        "For 2023, return the top 25 stores by promotional unit share (promo_units/total_units) among stores with at least 100 total units; tie-break by Store_Number ASC; columns: Store_Number, promo_unit_share, promo_units, total_units.",
+        "For Q1 2023 (2023-01-01 to 2023-03-31), return the top 30 stores by total revenue; tie-break by Store_Number ASC; columns: Store_Number, total_revenue, total_units.",
+        "For 2023, return the top 10 SKUs by total revenue with avg unit price = sum(Total_Sale_Value)/sum(Qty_Sold); tie-break by SKU_Coded ASC; columns: SKU_Coded, total_revenue, total_units, avg_unit_price.",
+        "For 2023, return month-by-promo aggregates with columns: month_start, On_Promo, total_revenue, total_units; order by month_start ASC, On_Promo ASC; expect 24 rows.",
+        "For 2023, return the top 50 stores by distinct SKUs sold; tie-break by Store_Number ASC; columns: Store_Number, distinct_skus.",
+        "For 2023, return the top 30 Product_Class_Code by promotional units sold (On_Promo=1); tie-break by Product_Class_Code ASC; columns: Product_Class_Code, promo_units.",
+        "Across the full dataset, return the 40 SKUs with the highest average unit price among SKUs with at least 50 units sold; avg_unit_price = sum(Total_Sale_Value)/sum(Qty_Sold); tie-break by SKU_Coded ASC; columns: SKU_Coded, avg_unit_price, total_units, total_revenue.",
+        "Return the 30 most recent Sold_Date values aggregated by date with columns: Sold_Date, total_revenue, total_units; order by Sold_Date DESC.",
+        "For 2022, return the top 25 stores by total units sold for Product_Class_Code = 22975; tie-break by Store_Number ASC; columns: Store_Number, total_units, total_revenue."
+    ]
+}
+
+def text_to_csv(text: str) -> List[List[str]]:
+    """Convert text table to CSV rows.
+    
+    Handles both space-separated and pipe-separated formats.
+    """
+    lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
+    if not lines:
+        return []
+    
+    rows = []
+    for line in lines:
+        # Try splitting by multiple spaces first
+        if '  ' in line:
+            parts = [p.strip() for p in line.split() if p.strip()]
+        # Try pipe separator
+        elif '|' in line:
+            parts = [p.strip() for p in line.split('|') if p.strip()]
+        # Fallback to comma
+        else:
+            parts = [p.strip() for p in line.split(',') if p.strip()]
+        
+        if parts:
+            rows.append(parts)
+    
+    return rows
+
+def save_csv(rows: List[List[str]], filepath: str):
+    """Save rows to CSV file."""
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerows(rows)
+
 
 df = pd.read_parquet(TRANSACTION_DATA_FILE_PATH)
 duckdb.sql(f"CREATE TABLE IF NOT EXISTS {table_name} AS SELECT * FROM df")
@@ -42,14 +110,14 @@ else:
 
 
 # Loop over all questions and ask user to input SQL for each
-for i, prompt in enumerate(agent_questions, 1):
+for i, prompt in enumerate(queries[PREFIX]):
     if any(entry['prompt'] == prompt for entry in dataset):
-        print(f'\nSkipping question {i}/{len(agent_questions)} as it already exists in the dataset.')
+        print(f'\nSkipping question {i+1}/{len(queries[PREFIX])} as it already exists in the dataset.')
         continue
     formatted_prompt = SQL_Generation_Prompt.format(prompt=prompt, columns=df.columns.to_list(), table_name=table_name)
     
     print(f'\n{"="*80}')
-    print(f'Question {i}/{len(agent_questions)}: {prompt}')
+    print(f'Question {i+1}/{len(queries[PREFIX])}: {prompt}')
     print(f'{"="*80}')
     print('\nPrompt for LLM:')
     print(formatted_prompt)
@@ -69,16 +137,22 @@ for i, prompt in enumerate(agent_questions, 1):
         print(result)
     except Exception as e:
         print(f"\nError executing query: {e}")
-   
+    
+    # Save to CSV
+    csv_path = f"evaluation/csv_queries/{PREFIX}_{i}_gt.csv"
+    result_rows = text_to_csv(result)
+    save_csv(result_rows, csv_path)
+
     # Save to dataset
     dataset.append({
         'prompt': prompt,
-        'sql_query': sql_query,
-        'ground_truth': result,
+        'gt_sql': sql_query,
+        'gt_data': result,
+        'gt_csv_path' : csv_path
     })
 
 # Save dataset as json file
-with open('evaluation/query_dataset.json', 'w') as f:
+with open(f"evaluation/{PREFIX}_dataset.json", 'w') as f:
     json.dump(dataset, f, indent=2)
 
 print(f'\n{"="*80}')
