@@ -19,7 +19,7 @@ def run_cpp_comparator(actual_csv: str, expected_csv: str, keys: List[str] = Non
     
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    print(result)
+    return result.stdout
 
 if __name__ == '__main__':
     # Ensure comparator is built
@@ -28,6 +28,9 @@ if __name__ == '__main__':
         subprocess.run(['cmake', '-S', 'cpp_evaluator', '-B', 'cpp_evaluator/build', '-G', 'Ninja'], check=True)
         subprocess.run(['cmake', '--build', 'cpp_evaluator/build', '--config', 'Release'], check=True)
 
-    path_gt = "evaluation/csv_queries/gpt_2_gt.csv"
-    path_gen = "evaluation/csv_queries/gpt_2_gen.csv"
-    run_cpp_comparator(path_gt, path_gen)
+    PREFIX = 'gpt' # options: 'my', 'claude', 'gpt'
+    index = 2
+    path_gt = f"evaluation/csv_queries/{PREFIX}_{index}_gt.csv"
+    path_gen = f"evaluation/csv_queries/{PREFIX}_{index}_gen.csv"
+    res = run_cpp_comparator(path_gt, path_gen)
+    print(res)
