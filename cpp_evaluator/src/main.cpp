@@ -153,6 +153,11 @@ struct DiffSummary {
     double rows_iou = 0.0;
     double columns_iou = 0.0;
     double iou = 0.0;
+    // Row set sizes (for debugging): |A|, |B|, |A∩B|, |A∪B|
+    size_t rows_set_a_size = 0;
+    size_t rows_set_b_size = 0;
+    size_t rows_intersection_size = 0;
+    size_t rows_union_size = 0;
 };
 
 template <typename K, typename V>
@@ -283,9 +288,18 @@ static DiffSummary compare_tables(const Table &a, const Table &b, const Options 
             for (const auto &k : set_b) if (set_a.count(k)) inter++;
         }
         size_t uni = set_a.size() + set_b.size() - inter;
+        // Save sizes for debugging / parity checks
+        s.rows_set_a_size = set_a.size();
+        s.rows_set_b_size = set_b.size();
+        s.rows_intersection_size = inter;
+        s.rows_union_size = uni;
         s.rows_iou = (uni > 0) ? static_cast<double>(inter) / static_cast<double>(uni) : 0.0;
     } else {
         s.rows_iou = 0.0;
+        s.rows_set_a_size = 0;
+        s.rows_set_b_size = 0;
+        s.rows_intersection_size = 0;
+        s.rows_union_size = 0;
     }
 
     // 3) Overall IoU = product (matches Python reference behavior)
@@ -315,6 +329,12 @@ static void print_json(const DiffSummary &s) {
     std::cout << "  \"rows_iou\": " << s.rows_iou << ",\n";
     std::cout << "  \"columns_iou\": " << s.columns_iou << ",\n";
     std::cout << "  \"iou\": " << s.iou << ",\n";
+    std::cout << "  \"rows_set_sizes\": {\n";
+    std::cout << "    \"A\": " << s.rows_set_a_size << ",\n";
+    std::cout << "    \"B\": " << s.rows_set_b_size << ",\n";
+    std::cout << "    \"intersection\": " << s.rows_intersection_size << ",\n";
+    std::cout << "    \"union\": " << s.rows_union_size << "\n";
+    std::cout << "  },\n";
     std::cout << "  \"duration_ms\": " << s.duration_ms;
     if (!s.error.empty()) {
         std::cout << ",\n  \"error\": \"" << s.error << "\"\n";
