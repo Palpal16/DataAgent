@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <vector>
 #include <cstdlib>
+#include <iterator>
 
 // Command-line options controlling comparison behavior
 struct Options {
@@ -96,7 +97,15 @@ static std::vector<std::string> split_csv_line(const std::string &line) {
             cur.push_back(c);
         }
     }
+    // Always push the final field (may be empty when line ends with a comma)
     out.push_back(cur);
+    return out;
+}
+
+// Helper: split a CSV line and drop the first field (used to skip index columns)
+static std::vector<std::string> split_csv_line_skip_first(const std::string &line) {
+    std::vector<std::string> out = split_csv_line(line);
+    if (!out.empty()) out.erase(out.begin());
     return out;
 }
 
@@ -113,10 +122,13 @@ static bool read_csv(const std::string &path, Table &t, std::string &err) {
     if (!f.is_open()) { err = "Cannot open file: " + path; return false; }
     std::string line;
     if (!std::getline(f, line)) { err = "Empty file: " + path; return false; }
+    // Parse header and skip first field (index)
     t.columns = split_csv_line(line);
+    if (t.columns.empty()) { err = "Malformed header in file: " + path; return false; }
+    t.col_index.clear();
     for (size_t i = 0; i < t.columns.size(); ++i) t.col_index[t.columns[i]] = i;
     while (std::getline(f, line)) {
-        auto parts = split_csv_line(line);
+        auto parts = split_csv_line_skip_first(line);
         // pad/truncate to header size
         parts.resize(t.columns.size());
         t.rows.push_back(std::move(parts));
@@ -128,12 +140,17 @@ static bool read_csv(const std::string &path, Table &t, std::string &err) {
 static std::string make_key(const std::vector<std::string> &keys, const Table &t, const std::vector<std::string> &row) {
     if (keys.empty()) return {};
     std::ostringstream oss;
+    oss << "(";
+    bool first = true;
     for (size_t i = 0; i < keys.size(); ++i) {
         auto it = t.col_index.find(keys[i]);
         if (it == t.col_index.end()) continue; // skip missing key silently
-        if (i) oss << "\x1f"; // unit separator
+        if (!first) oss << ",";
         oss << row[it->second];
+        first = false;
     }
+    oss << ")";
+    std::cerr << "Key: " << oss.str() << std::endl;
     return oss.str();
 }
 
@@ -152,7 +169,7 @@ struct DiffSummary {
     // iou:         overall score = rows_iou * columns_iou
     double rows_iou = 0.0;
     double columns_iou = 0.0;
-    double iou = 0.0;
+    double _overall_iou = 0.0;
     // Row set sizes (for debugging): |A|, |B|, |A∩B|, |A∪B|
     size_t rows_set_a_size = 0;
     size_t rows_set_b_size = 0;
@@ -215,13 +232,30 @@ static void print_table(const Table &t, const std::string &name, size_t max_rows
     }
 }
 
+// Function determine the intersection of two sets
+static std::set<std::string> intersection_set(const std::set<std::string> &a, const std::set<std::string> &b) {
+    std::set<std::string> intsect;
+    std::set_intersection(a.begin(), a.end(),
+                          b.begin(), b.end(),
+                          std::inserter(intsect, intsect.begin()));
+    return intsect;
+}
+
+//Function determine the union of two sets
+static std::set<std::string> union_set(const std::set<std::string> &a, const std::set<std::string> &b) {
+    std::set<std::string> uni;
+    std::set_union(a.begin(), a.end(),
+                          b.begin(), b.end(),
+                          std::inserter(uni, uni.begin()));
+    return uni;
+}
+
 
 // Compare two tables:
 // - Validate column set equality (schema)
 // - With keys: align rows by key, then compare values
 // - Without keys: compare rows positionally (order-sensitive)
 static DiffSummary compare_tables(const Table &a, const Table &b, const Options &opt) {
-
     auto start = std::chrono::steady_clock::now();
     DiffSummary s;
     s.row_count_actual = a.rows.size();
@@ -230,80 +264,38 @@ static DiffSummary compare_tables(const Table &a, const Table &b, const Options 
     // 1) Columns IoU = |A ∩ B| / |A ∪ B| where sets are column names
     std::set<std::string> cols_a(a.columns.begin(), a.columns.end());
     std::set<std::string> cols_b(b.columns.begin(), b.columns.end());
-    size_t cols_intersection = 0;
-    std::set<std::string> cols_union = cols_a;
-    //  set.count(key) returns how many times the key is in the set
-    for (const auto &c : cols_a) if (cols_b.count(c)) cols_intersection++;
-    for (const auto &c : cols_b) cols_union.insert(c);
-    if (!cols_union.empty()) {
-        s.columns_iou = static_cast<double>(cols_intersection) / static_cast<double>(cols_union.size());
-    } else {
-        s.columns_iou = 0.0;
-    }
+    std::set<std::string> cols_intersection = intersection_set(cols_a, cols_b);
+    // Just rename cols_intersection to common_cols for clarity
+    std::vector<std::string> common_cols(cols_intersection.begin(), cols_intersection.end());
+    std::cerr << "Common columns: " << std::endl;
+    for (const auto &c : common_cols) std::cerr << c << std::endl;
 
+    std::set<std::string> cols_union = union_set(cols_a, cols_b);
+    s.columns_iou = !cols_union.empty()
+        ? static_cast<double>(cols_intersection.size()) / static_cast<double>(cols_union.size())
+        : 0.0;
+    
     // 2) Rows IoU computed on the intersection of columns:
     //    - Build a canonical string key per row using only common columns (trimmed; optional lowercase)
     //    - Compare sets of unique row keys across the two tables
-    std::vector<std::string> common_cols;
-    common_cols.reserve(std::min(a.columns.size(), b.columns.size()));
-    for (const auto &c : a.columns) {
-        if (b.col_index.find(c) != b.col_index.end()) common_cols.push_back(c);
-    }
     if (!common_cols.empty()) {
-        std::unordered_set<std::string> set_a;
-        std::unordered_set<std::string> set_b;
-        set_a.reserve(a.rows.size() * 2);
-        set_b.reserve(b.rows.size() * 2);
-
-        // Build a canonical string key for a row restricted to the intersection columns.
-        // - Order of fields follows 'common_cols' so it is stable across A/B
-        // - Fields are trimmed; optionally lowercased when case-insensitive compare is enabled
-        // - We join fields with the ASCII Unit Separator (U+001F) to avoid accidental collisions
-        // Example:
-        //   common_cols = ["week", "store_id", "sales"]
-        //   row = ["10", "22825", "108118.9"]
-        //   key => "10\x1f22825\x1f108118.9"
-        // Case-insensitive example:
-        //   row = ["10", "22825", "Foo"] with case_insensitive=true -> "10\x1f22825\x1ffoo"
-        auto build_common_columns_row_key = [&](const Table &t, const std::vector<std::string> &row) -> std::string {
-            std::ostringstream oss;
-            for (size_t i = 0; i < common_cols.size(); ++i) {
-                auto it = t.col_index.find(common_cols[i]);
-                if (it == t.col_index.end()) continue; // safety: skip if column absent
-                if (i) oss << "\x1f"; // unit separator between fields
-                std::string v = row[it->second];
-                if (opt.case_insensitive) v = lower_copy(v); // normalize case if requested
-                oss << trim(v);
-            }
-            return oss.str();
-        };
-
-        for (const auto &ra : a.rows) set_a.insert(build_common_columns_row_key(a, ra));
-        for (const auto &rb : b.rows) set_b.insert(build_common_columns_row_key(b, rb));
-
-        size_t inter = 0;
-        if (set_a.size() <= set_b.size()) {
-            for (const auto &k : set_a) if (set_b.count(k)) inter++;
-        } else {
-            for (const auto &k : set_b) if (set_a.count(k)) inter++;
-        }
-        size_t uni = set_a.size() + set_b.size() - inter;
-        // Save sizes for debugging / parity checks
-        s.rows_set_a_size = set_a.size();
-        s.rows_set_b_size = set_b.size();
-        s.rows_intersection_size = inter;
-        s.rows_union_size = uni;
-        s.rows_iou = (uni > 0) ? static_cast<double>(inter) / static_cast<double>(uni) : 0.0;
-    } else {
-        s.rows_iou = 0.0;
-        s.rows_set_a_size = 0;
-        s.rows_set_b_size = 0;
-        s.rows_intersection_size = 0;
-        s.rows_union_size = 0;
+        std::set<std::string> set_a;
+        std::set<std::string> set_b;
+        std::cerr << "Set A: " << std::endl;
+        for (const auto &ra : a.rows) set_a.insert(make_key(common_cols, a, ra));
+        for (const auto &rb : b.rows) set_b.insert(make_key(common_cols, b, rb));
+        std::cerr << "Set B: " << std::endl;
+        for (const auto &rb : set_b) std::cerr << rb << std::endl;
+        std::set<std::string> rows_intersection = intersection_set(set_a, set_b);
+        std::set<std::string> rows_union = union_set(set_a, set_b);
+        s.rows_intersection_size = rows_intersection.size();
+        s.rows_union_size = rows_union.size();
+        s.rows_iou = (rows_union.size() > 0) ? static_cast<double>(rows_intersection.size()) / static_cast<double>(rows_union.size()) : 0.0;
     }
+
 
     // 3) Overall IoU = product (matches Python reference behavior)
-    s.iou = s.columns_iou * s.rows_iou;
+    s._overall_iou = s.columns_iou * s.rows_iou;
 
     // Consider tables equal only under perfect match across columns and rows
     s.equal = (s.columns_iou == 1.0) && (s.rows_iou == 1.0);
@@ -328,7 +320,7 @@ static void print_json(const DiffSummary &s) {
     std::cout << "],\n";
     std::cout << "  \"rows_iou\": " << s.rows_iou << ",\n";
     std::cout << "  \"columns_iou\": " << s.columns_iou << ",\n";
-    std::cout << "  \"iou\": " << s.iou << ",\n";
+    std::cout << "  \"iou\": " << s._overall_iou << ",\n";
     std::cout << "  \"rows_set_sizes\": {\n";
     std::cout << "    \"A\": " << s.rows_set_a_size << ",\n";
     std::cout << "    \"B\": " << s.rows_set_b_size << ",\n";
@@ -355,7 +347,6 @@ static void print_usage() {
 // Exit code: 0 equal, 1 not equal, 2 usage/error
 int main(int argc, char **argv) {
     std::cerr << "Starting C++ comparator" << std::endl;
-    std::cout << "Starting C++ comparator" << std::endl;
     Options opt;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
