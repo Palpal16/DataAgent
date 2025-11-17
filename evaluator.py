@@ -41,6 +41,7 @@ def run_cpp_comparator(
     float_abs: float = 1e-8,
     float_rel: float = 1e-6,
     case_insensitive: bool = False,
+    stream_debug: bool = False,
 ) -> Dict:
     args = [evaluator_exe, "--actual", actual_csv, "--expected", expected_csv,
             "--float-abs", str(float_abs), "--float-rel", str(float_rel)]
@@ -49,7 +50,12 @@ def run_cpp_comparator(
     if case_insensitive:
         args += ["--case-insensitive"]
 
-    proc = subprocess.run(args, capture_output=True, text=True)
+    # If stream_debug is True, inherit stderr so C++ debug (sent to stderr) prints to terminal.
+    # Keep stdout captured to parse JSON report.
+    if stream_debug:
+        proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=None, text=True)
+    else:
+        proc = subprocess.run(args, capture_output=True, text=True)
     stdout = proc.stdout.strip()
     try:
         report = json.loads(stdout) if stdout else {}
@@ -71,6 +77,7 @@ def evaluate_table_str_against_expected(
     float_abs: float = 1e-8,
     float_rel: float = 1e-6,
     case_insensitive: bool = False,
+    stream_debug: bool = False,
 ) -> Dict:
     evaluator = evaluator_exe or os.path.join("cpp_evaluator", "build", "resultcmp.exe")
     with tempfile.TemporaryDirectory() as td:
@@ -84,6 +91,7 @@ def evaluate_table_str_against_expected(
             float_abs=float_abs,
             float_rel=float_rel,
             case_insensitive=case_insensitive,
+            stream_debug=stream_debug,
         )
 
 

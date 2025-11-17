@@ -15,6 +15,10 @@ def compare_csv(csv1_path, csv2_path):
     cols_intersection = len(cols1.intersection(cols2))
     cols_union = len(cols1.union(cols2))
     columns_iou = cols_intersection / cols_union if cols_union > 0 else 0.0
+    print('Columns intersection:')
+    print(cols1.intersection(cols2))
+    print('Columns union:')
+    print(cols1.union(cols2))
     
     # Row IoU
     cols_intersection = list(cols1.intersection(cols2))
@@ -23,6 +27,10 @@ def compare_csv(csv1_path, csv2_path):
         df2_subset = df2[cols_intersection].apply(lambda x: tuple(x), axis=1)
         rows1 = set(df1_subset)
         rows2 = set(df2_subset)
+        print('Intersection:')
+        print(rows1.intersection(rows2))
+        print('Union:')
+        print(rows1.union(rows2))
         rows_intersection = len(rows1.intersection(rows2))
         rows_union = len(rows1.union(rows2))
         rows_iou = rows_intersection / rows_union if rows_union > 0 else 0.0
