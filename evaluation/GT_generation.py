@@ -2,9 +2,8 @@ import duckdb
 import pandas as pd
 import json
 import os
-import csv
 from typing import Dict, List, Tuple
-
+from Agent.utils import text_to_csv, save_csv
 
 PREFIX = 'claude' #options: 'my', 'claude', 'gpt'
 
@@ -53,39 +52,6 @@ queries = {
         "For 2022, return the top 25 stores by total units sold for Product_Class_Code = 22975; tie-break by Store_Number ASC."
     ]
 }
-
-def text_to_csv(text: str) -> List[List[str]]:
-    """Convert text table to CSV rows.
-    
-    Handles both space-separated and pipe-separated formats.
-    """
-    lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
-    if not lines:
-        return []
-    
-    rows = []
-    for line in lines:
-        # Try splitting by multiple spaces first
-        if '  ' in line:
-            parts = [p.strip() for p in line.split() if p.strip()]
-        # Try pipe separator
-        elif '|' in line:
-            parts = [p.strip() for p in line.split('|') if p.strip()]
-        # Fallback to comma
-        else:
-            parts = [p.strip() for p in line.split(',') if p.strip()]
-        
-        if parts:
-            rows.append(parts)
-    
-    return rows
-
-def save_csv(rows: List[List[str]], filepath: str):
-    """Save rows to CSV file."""
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerows(rows)
 
 
 df = pd.read_parquet(TRANSACTION_DATA_FILE_PATH)

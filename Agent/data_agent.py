@@ -659,10 +659,9 @@ class SalesDataAgent:
         try:
             from IPython.display import Image, display
             display(Image(self.graph.get_graph().draw_mermaid_png()))
-            return ""
         except Exception:
             # Fallback if mermaid is not available
-            return self.graph.get_graph().print_ascii()
+            print(self.graph.get_graph().print_ascii())
 
 
 __all__ = ["SalesDataAgent", "State"]
