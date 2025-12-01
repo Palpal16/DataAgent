@@ -46,8 +46,11 @@ def compare_csv(csv1_path, csv2_path):
     Calculate IoU using multisets for proper duplicate handling.
     Column-order independent row comparison.
     """
-    df1 = pd.read_csv(csv1_path)
-    df2 = pd.read_csv(csv2_path)
+    try:
+        df1 = pd.read_csv(csv1_path)
+        df2 = pd.read_csv(csv2_path)
+    except:
+        return 0. , 0. , 0.
     
     # 1. Column names IoU
     cols1 = set(df1.columns)
@@ -78,7 +81,7 @@ def compare_csv(csv1_path, csv2_path):
         rows_iou = sum(intersection.values()) / sum(union.values()) if union else 0.0
         final_rows_iou = columns_names_iou * rows_iou
     else:
-        rows_iou = 0.0
+        final_rows_iou = 0.0
     
     return columns_names_iou, final_rows_iou, data_iou
 
