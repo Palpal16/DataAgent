@@ -16,6 +16,7 @@ if __name__ == "__main__":
         path_gen = data['gen_csv_path']
         
         columns_names_iou, rows_iou, data_iou = compare_csv(path_gt, path_gen)
-        print(f"Index: {i}\nColumns Names IoU: {columns_names_iou:.2f} -- Rows IoU: {rows_iou:.2f}")
-        print(f"Data IoU: {data_iou:.2f} -- Expected IoU: {data['annotated_accuracy']}")
+        print(f"Index: {i}\nColumns Names IoU: {columns_names_iou:.2f} -- Rows IoU: {rows_iou:.2f} -- Data IoU: {data_iou:.2f}")
+        if 'annotated_accuracy' in data:
+            print(f"Expected IoU: {data['annotated_accuracy']}")
         print('\n')

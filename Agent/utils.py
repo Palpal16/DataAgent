@@ -82,7 +82,7 @@ def compare_csv(csv1_path, csv2_path):
     
     return columns_names_iou, final_rows_iou, data_iou
 
-def best_of_n(agent, prompt: str, expected_csv: str = None, n: int=3, temperature=0.1) -> Dict:
+def best_of_n(agent, prompt: str, expected_csv: str=None, csv_path: str=None, n: int=3, temperature: float=0.1) -> Dict:
     if isinstance(temperature, (list, tuple)) and len(temperature) == 2:
         temperatures = np.linspace(temperature[0], temperature[1], n)
     else:
@@ -94,7 +94,6 @@ def best_of_n(agent, prompt: str, expected_csv: str = None, n: int=3, temperatur
         agent.llm.temperature = temp
         try:
             ret = agent.run(prompt, only_lookup=True)
-            csv_path = expected_csv.replace('_gt.csv', f'_gen_temp_{temp:.2f}.csv')
             result_rows = text_to_csv(ret['data'])
             save_csv(result_rows, csv_path)
             columns_names_iou, rows_iou, data_iou = compare_csv(expected_csv, csv_path)

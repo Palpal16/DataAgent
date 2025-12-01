@@ -10,7 +10,7 @@
     "annotated_accuracy": "1"
   },
   {
-    "prompt": "Which 20 SKUs had the highest total sales value between in 2022?",
+    "prompt": "Which 20 SKUs had the highest total sales value in 2022?",
     "gt_sql": "SELECT SKU_Coded, SUM(Total_Sale_Value) AS total_sales FROM sales WHERE CAST(Sold_Date AS VARCHAR) LIKE '2022%' GROUP BY SKU_Coded ORDER BY total_sales DESC LIMIT 20",
     "gt_data": "    SKU_Coded    total_sales\n0     6194250  138310.439028\n1     6184900  129932.757214\n2     6191400  103176.253014\n3     6200700   92336.089054\n4     6186250   72087.937925\n5     6184100   69379.229394\n6     6179250   65568.949358\n7     6176250   62800.821800\n8     6176200   57747.911646\n9     6195800   56729.059679\n10    6185100   56682.458836\n11    6193200   53036.611603\n12    6197050   52266.691725\n13    6196200   51481.511374\n14    6193800   51106.178653\n15    6177350   45348.988932\n16    6193100   44696.299483\n17    6187750   44669.048933\n18    6196650   44390.409692\n19    6199300   43734.051445",
     "gt_csv_path": "evaluation/csv_queries/claude_1_gt.csv",
@@ -28,7 +28,6 @@
     "gen_data": "   avg(Total_Sale_Value)\n0              19.018132",
     "gen_csv_path": "evaluation/csv_queries/claude_2_gen.csv",
     "annotated_accuracy": "0"
-
   },
   {
     "prompt": "Show all sales from store number 1980 where the quantity sold was greater than 5",
@@ -79,5 +78,41 @@
     "gen_data": "    Product_Class_Code\n0                22900\n1                22850\n2                24425\n3                22800\n4                22950\n5                24375\n6                22975\n7                24400\n8                22825\n9                22875\n10               22925",
     "gen_csv_path": "evaluation/csv_queries/claude_7_gen.csv",
     "annotated_accuracy": "0.4"
+  },
+  {
+    "prompt": "Which 20 SKUs had the highest total sales value between January 2022 and December 2022?",
+    "gt_sql": "SELECT SKU_Coded, sum(Total_Sale_Value) FROM sales WHERE Sold_Date >= '2022-01-01' AND Sold_Date <= '2022-12-31' GROUP BY SKU_Coded ORDER BY sum(Total_Sale_Value) DESC LIMIT 20",
+    "gt_data": "    SKU_Coded  sum(Total_Sale_Value)\n0     6194250          138310.439028\n1     6184900          129932.757214\n2     6191400          103176.253014\n3     6200700           92336.089054\n4     6186250           72087.937925\n5     6184100           69379.229394\n6     6179250           65568.949358\n7     6176250           62800.821800\n8     6176200           57747.911646\n9     6195800           56729.059679\n10    6185100           56682.458836\n11    6193200           53036.611603\n12    6197050           52266.691725\n13    6196200           51481.511374\n14    6193800           51106.178653\n15    6177350           45348.988932\n16    6193100           44696.299483\n17    6187750           44669.048933\n18    6196650           44390.409692\n19    6199300           43734.051445",
+    "gt_csv_path": "evaluation/csv_queries/claude_1_gt.csv",
+    "gen_sql": "SELECT SKU_Coded FROM sales WHERE Total_Sale_Value = ( SELECT MAX(Total_Sale_Value) FROM sales WHERE Sold_Date BETWEEN '2022-01-01' AND '2022-12-31' ) LIMIT 20",
+    "gen_data": "   SKU_Coded\n0    6182450",
+    "gen_csv_path": "evaluation/csv_queries/claude_8_gen.csv"
+  },
+  {
+    "prompt": "How many sales transactions occurred in each month of 2023?",
+    "gt_sql": "SELECT DATE_TRUNC('month', Sold_Date), COUNT(*) FROM sales WHERE YEAR(Sold_Date) = 2023 GROUP BY DATE_TRUNC('month', Sold_Date) ORDER BY DATE_TRUNC('month', Sold_Date)",
+    "gt_data": "   date_trunc('month', Sold_Date)  count_star()\n0                      2023-01-01         23916\n1                      2023-02-01         21848\n2                      2023-03-01         22241\n3                      2023-04-01         20385\n4                      2023-05-01         20371\n5                      2023-06-01         20011\n6                      2023-07-01         19831\n7                      2023-08-01         21965\n8                      2023-09-01         22674\n9                      2023-10-01         25143\n10                     2023-11-01         25382\n11                     2023-12-01         38670",
+    "gt_csv_path": "evaluation/csv_queries/claude_2_gt.csv",
+    "gen_sql": "SELECT COUNT(*) , EXTRACT(MONTH FROM CAST(Sold_Date AS VARCHAR)) , EXTRACT(YEAR FROM CAST(Sold_Date AS VARCHAR))\nFROM sales\nWHERE Sold_Date LIKE '%2023%'",
+    "gen_data": "",
+    "gen_csv_path": "evaluation/csv_queries/claude_9_gen.csv"
+  },
+  {
+    "prompt": "Which 25 product class codes had the most promotional sales in 2023?",
+    "gt_sql": "SELECT Product_Class_Code, sum(Total_Sale_Value) FROM sales WHERE YEAR(Sold_Date) = 2023 AND On_Promo = 1 GROUP BY Product_Class_Code ORDER BY sum(Total_Sale_Value) DESC LIMIT 25",
+    "gt_data": "   Product_Class_Code  sum(Total_Sale_Value)\n0               22850           55877.100128\n1               22900           28289.710897\n2               24425           12944.479937\n3               22975            1913.270003\n4               22950             682.299982",
+    "gt_csv_path": "evaluation/csv_queries/claude_9_gt.csv",
+    "gen_sql": "SELECT Product_Class_Code FROM sales GROUP BY Product_Class_Code ORDER BY SUM(Total_Sale_Value * (CASE WHEN On_Promo = 1 THEN 1 ELSE 0 END)) DESC LIMIT 25;",
+    "gen_data": "    Product_Class_Code\n0                22900\n1                22850\n2                24425\n3                22800\n4                22950\n5                24375\n6                22975\n7                24400\n8                22825\n9                22875\n10               22925",
+    "gen_csv_path": "evaluation/csv_queries/claude_10_gen.csv"
+  },
+  {
+    "prompt": "List all sales that were on promotion in 2024",
+    "gt_sql": "SELECT * FROM sales WHERE On_Promo = 1 AND YEAR(Sold_Date) = 2024",
+    "gt_data": "   Store_Number  SKU_Coded  Product_Class_Code  Sold_Date  Qty_Sold  Total_Sale_Value  On_Promo\n0          3190    6204850               22850 2024-01-01         2             258.0         1\n1          2530    6204850               22850 2024-01-01         1             129.0         1\n2          1980    6204850               22850 2024-01-01         1             129.0         1",
+    "gt_csv_path": "evaluation/csv_queries/claude_5_gt.csv",
+    "gen_sql": "SELECT * FROM sales WHERE CAST(Sold_Date AS VARCHAR) LIKE '%2024%' AND On_Promo = 'Y'",
+    "gen_data": "",
+    "gen_csv_path": "evaluation/csv_queries/claude_11_gen.csv"
   }
 ]
