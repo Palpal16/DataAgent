@@ -2,10 +2,17 @@ import duckdb
 import pandas as pd
 import json
 import os
+import sys
 from typing import Dict, List, Tuple
+
+# Add workspace root to sys.path
+workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if workspace_root not in sys.path:
+    sys.path.insert(0, workspace_root)
+
 from Agent.utils import text_to_csv, save_csv
 
-PREFIX = 'claude' #options: 'my', 'claude', 'gpt'
+PREFIX = 'gpt' #options: 'my', 'claude', 'gpt'
 
 TRANSACTION_DATA_FILE_PATH = 'data/Store_Sales_Price_Elasticity_Promotions_Data.parquet'
 DATASET_FILE_PATH = f"evaluation/{PREFIX}_dataset.json"
@@ -31,7 +38,7 @@ queries = {
         "How many sales transactions occurred in each month of 2023?",
         "What is the average sale value for each product class code that has more than 100 transactions?",
         "Show all sales from store number 1980 where the quantity sold was greater than 5",
-        "List all sales that were on promotion in March 2024",
+        "List all sales that were on promotion in 2024",
         "Which stores made sales with a total sale value above $100 in Q1 2022?",
         "What are the top 15 stores by total quantity sold in 2022?",
         "Show the daily total sales value for store 2970 in February 2024",
@@ -57,13 +64,12 @@ queries = {
 df = pd.read_parquet(TRANSACTION_DATA_FILE_PATH)
 duckdb.sql(f"CREATE TABLE IF NOT EXISTS {table_name} AS SELECT * FROM df")
 
-SQL_Generation_Prompt = "" \
-"Generate an SQL query based on the prompt. Please just reply with the SQL query and NO MORE, just the query. Really there is no need to create any comment besides the query, that's the only important thing." \
-"The prompt is : {prompt}" \
-"The available columns are: {columns}. " \
-"The table name is: {table_name}. " \
-"If you need to use a DATE column with LIKE or pattern matching, first CAST it to VARCHAR like this: CAST(date_column AS VARCHAR) LIKE '%2021-11%' " \
-"Return only the SQL query, with no explanations or markdown formatting."
+SQL_GENERATION_PROMPT = """Generate an SQL query based on the prompt.
+Please just reply with the SQL query and NO MORE, just the query.
+The prompt is : {prompt}. The available columns are: {columns}. The table name is: {table_name}.
+If you need to use a DATE column with LIKE or pattern matching, first CAST it to VARCHAR like this: CAST(date_column AS VARCHAR) LIKE '%2021-11%'.
+Return only the SQL query, with no explanations or markdown formatting.
+"""
 
 
 # Load existing dataset if it exists
@@ -77,11 +83,12 @@ else:
 
 
 # Loop over all questions and ask user to input SQL for each
+curr_index = len(dataset)
 for i, prompt in enumerate(queries[PREFIX]):
     if any(entry['prompt'] == prompt for entry in dataset):
         print(f'\nSkipping question {i+1}/{len(queries[PREFIX])} as it already exists in the dataset.')
         continue
-    formatted_prompt = SQL_Generation_Prompt.format(prompt=prompt, columns=df.columns.to_list(), table_name=table_name)
+    formatted_prompt = SQL_GENERATION_PROMPT.format(prompt=prompt, columns=df.columns.to_list(), table_name=table_name)
     
     print(f'\n{"="*80}')
     print(f'Question {i+1}/{len(queries[PREFIX])}: {prompt}')
@@ -91,7 +98,7 @@ for i, prompt in enumerate(queries[PREFIX]):
     print('-'*80)
     
     # Ask user to input the SQL query
-    user_sql = input('\nPlease enter the SQL query for this question: ')
+    user_sql = input('\nPlease enter the SQL gt query for this question: ')
 
     # Data extraction part
     sql_query = user_sql.strip()
@@ -106,7 +113,7 @@ for i, prompt in enumerate(queries[PREFIX]):
         print(f"\nError executing query: {e}")
     
     # Save to CSV
-    csv_path = f"evaluation/csv_queries/{PREFIX}_{i}_gt.csv"
+    csv_path = f"evaluation/csv_queries/{PREFIX}_{curr_index}_gt.csv"
     result_rows = text_to_csv(result)
     save_csv(result_rows, csv_path)
 
@@ -117,6 +124,7 @@ for i, prompt in enumerate(queries[PREFIX]):
         'gt_data': result,
         'gt_csv_path' : csv_path
     })
+    curr_index +=1
 
 # Save dataset as json file
 with open(f"evaluation/{PREFIX}_dataset.json", 'w') as f:

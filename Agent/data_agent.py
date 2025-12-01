@@ -56,21 +56,6 @@ DEFAULT_DATA_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data", "Store_Sales_Price_Elasticity_Promotions_Data.parquet"
 )
 
-def check_data_file() -> bool:
-    """Check if the default data file exists and print its path.
-    
-    Returns:
-        bool: True if file exists, False otherwise
-    """
-    print("DEFAULT_DATA_PATH: " + DEFAULT_DATA_PATH)
-    if not os.path.exists(DEFAULT_DATA_PATH):
-        print("The file does not exist")
-        return False
-    print("The file exists")
-    return True
-
-check_data_file()
-
 # -----------------------------
 # State Definition
 # -----------------------------
@@ -91,15 +76,12 @@ class State(TypedDict):
 # LLM Helpers
 # -----------------------------
 
-SQL_GENERATION_PROMPT = "" \
-"Generate an SQL query based on the prompt. Please just reply with the SQL query and NO MORE, just the query. Really there is no need to create any comment besides the query, that's the only important thing." \
-"The prompt is : {prompt}" \
-"The available columns are: {columns}. " \
-"The table name is: {table_name}. " \
-"If you need to use a DATE column with LIKE or pattern matching, first CAST it to VARCHAR like this: CAST(date_column AS VARCHAR) LIKE '%2021-11%' " \
-"Return only the SQL query, with no explanations or markdown formatting."
-
-
+SQL_GENERATION_PROMPT = """Generate an SQL query based on the prompt.
+Please just reply with the SQL query and NO MORE, just the query.
+The prompt is : {prompt}. The available columns are: {columns}. The table name is: {table_name}.
+If you need to use a DATE column with LIKE or pattern matching, first CAST it to VARCHAR like this: CAST(date_column AS VARCHAR) LIKE '%2021-11%'.
+Return only the SQL query, with no explanations or markdown formatting.
+"""
 
 
 
@@ -143,13 +125,13 @@ def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
     Returns:
         Updated state containing 'data' (string table) or 'error'.
     """
+    table_name = "sales"
+    df = pd.read_parquet(DEFAULT_DATA_PATH)
+    duckdb.sql("DROP TABLE IF EXISTS sales")
+    duckdb.register("df", df)
+    duckdb.sql(f"CREATE TABLE {table_name} AS SELECT * FROM df")
+    sql_query = generate_sql_query(state, df.columns.tolist(), table_name, llm)
     try:
-        table_name = "sales"
-        df = pd.read_parquet(DEFAULT_DATA_PATH)
-        duckdb.sql("DROP TABLE IF EXISTS sales")
-        duckdb.register("df", df)
-        duckdb.sql(f"CREATE TABLE {table_name} AS SELECT * FROM df")
-        sql_query = generate_sql_query(state, df.columns.tolist(), table_name, llm)
         result_df = duckdb.sql(sql_query).df()
         result_str = result_df.to_string()
         if tracer is not None:
@@ -162,9 +144,9 @@ def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
             except Exception:
                 pass
         return {**state, "data": result_str, "sql_query": sql_query}
-    except Exception as e:
+    except Exception as e: # If the SQL fails, return empty results
         print(f"Error accessing data: {str(e)}")
-        return {**state, "data": [], "sql_query": [], "error": f"Error accessing data: {str(e)}"}
+        return {**state, "data": "", "sql_query": sql_query, "error": f"Error accessing data: {str(e)}"}
 
 def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
     """Select the next tool to run given the current conversation state.
@@ -183,14 +165,15 @@ def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
     Returns:
         Updated state including 'tool_choice'.
     """
-    tools_description = (
-        "You have access to the following tools to help you with your task:\n\n"
-        "- lookup_sales_data: Look up sales data from a parquet file using SQL.\n"
-        "- analyzing_data: Analyze the sales data for trends and insights.\n"
-        "- create_visualization: Create visualizations based on the sales data.\n"
-        "- end: End the conversation if the task is complete.\n\n"
-        "Based on the actual state and the user prompt, decide which tool to use next."
-    )
+    tools_description = """You have access to the following tools to help you with your task:
+
+    - lookup_sales_data: Look up sales data from a parquet file using SQL.
+    - analyzing_data: Analyze the sales data for trends and insights.
+    - create_visualization: Create visualizations based on the sales data.
+    - end: End the conversation if the task is complete.
+
+    Based on the actual state and the user prompt, decide which tool to use next.
+    """
 
     decision_prompt = f"""
     {tools_description}
@@ -596,7 +579,6 @@ class SalesDataAgent:
         *,
         visualization_goal: Optional[str] = None,
         initial_state: Optional[Dict] = None,
-        expected_csv: Optional[str] = None,
         only_lookup: bool = False
     ) -> Dict:
         """Execute the agent for a single prompt.
@@ -628,8 +610,17 @@ class SalesDataAgent:
             if only_lookup:
                 print("[Agent] Running only lookup_sales_data")
                 try:
-                    result = lookup_sales_data(state, self.llm)
-                    return result
+                    if self.tracing_enabled and self.tracer is not None:
+                        with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                            span.set_input(state)  # type: ignore[attr-defined]
+                            result = lookup_sales_data(state, self.llm, self.tracer)
+                            span.set_output(result)  # type: ignore[attr-defined]
+                            if StatusCode is not None:
+                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                            return result
+                    else:
+                        result = lookup_sales_data(state, self.llm)
+                        return result
                 except Exception as _e:
                     return {**state, "error": f"Lookup failed: {str(_e)}"}
             print("Running the graph...")
@@ -683,7 +674,6 @@ if __name__ == "__main__":
     output = agent.run(
         args.prompt,
         visualization_goal=args.visualization_goal,
-        expected_csv=args.expected_csv,
         only_lookup=args.lookup_only
     )
     # Minimal printout
