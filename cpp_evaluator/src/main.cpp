@@ -250,6 +250,107 @@ static std::set<std::string> union_set(const std::set<std::string> &a, const std
     return uni;
 }
 
+static std::multiset<std::string> intersection_multiset(std::multiset<std::string> a, std::multiset<std::string> b) {
+    std::multiset<std::string> intersection;
+    std::set_intersection(a.begin(), a.end(), b.begin(), b.end(),
+                          std::inserter(intersection, intersection.begin()));
+    return intersection;
+}
+
+// Returns the union of two multisets: for each distinct string element,
+// includes it as many times as its maximum count in either input multiset.
+// for example if a = {a, b, b, c} and b = {a, b, b, d}, then the union is {a, b, b, c, d}
+static std::multiset<std::string> union_multiset(const std::multiset<std::string>& a, const std::multiset<std::string>& b) {
+    // Map to hold the max count of each unique string from both multisets
+    std::map<std::string, int> count_map;
+    // Count occurrences in 'a'
+    for (const auto& x : a) ++count_map[x];
+    // Update counts to the max of 'a' and 'b' for each string in 'b'
+    for (const auto& x : b) count_map[x] = std::max(count_map[x], static_cast<int>(b.count(x)));
+    // Build the resulting multiset with each string inserted 'max_count' times
+    std::multiset<std::string> result;
+    for (const auto& kv : count_map) {
+        int max_count = std::max(static_cast<int>(a.count(kv.first)), static_cast<int>(b.count(kv.first)));
+        for (int i = 0; i < max_count; ++i)
+            result.insert(kv.first);
+    }
+    return result;
+}
+
+static DiffSummary compare_tables_multiset(const Table &a, const Table &b, const Options &opt) {
+    auto start = std::chrono::steady_clock::now();
+    DiffSummary s;
+    s.row_count_actual = a.rows.size();
+    s.row_count_expected = b.rows.size();
+    
+    // 1) Columns IoU = |A ∩ B| / |A ∪ B| where sets are column names
+    std::multiset<std::string> cols_a(a.columns.begin(), a.columns.end());
+    std::multiset<std::string> cols_b(b.columns.begin(), b.columns.end());
+    std::multiset<std::string> cols_intersection = intersection_multiset(cols_a, cols_b);
+    // Just rename cols_intersection to common_cols for clarity
+    std::vector<std::string> common_cols(cols_intersection.begin(), cols_intersection.end());
+    std::cerr << "Common columns: " << std::endl;
+    for (const auto &c : common_cols) std::cerr << c << std::endl;
+    std::multiset<std::string> cols_union = union_multiset(cols_a, cols_b);
+    s.columns_iou = !cols_union.empty()
+        ? static_cast<double>(cols_intersection.size()) / static_cast<double>(cols_union.size())
+        : 0.0;
+    // Print cols a and b in the same line, comma separated
+    std::cerr << "Cols A: ";
+    for (auto it = cols_a.begin(); it != cols_a.end(); ++it) {
+        if (it != cols_a.begin()) std::cerr << ",";
+        std::cerr << *it;
+    }
+    std::cerr << std::endl;
+
+    std::cerr << "Cols B: ";
+    for (auto it = cols_b.begin(); it != cols_b.end(); ++it) {
+        if (it != cols_b.begin()) std::cerr << ",";
+        std::cerr << *it;
+    }
+    std::cerr << std::endl;
+
+    std::cerr << "Cols Intersection: ";
+    for (auto it = cols_intersection.begin(); it != cols_intersection.end(); ++it) {
+        if (it != cols_intersection.begin()) std::cerr << ",";
+        std::cerr << *it;
+    }
+    std::cerr << std::endl;
+
+    std::cerr << "Cols Union: ";
+    for (auto it = cols_union.begin(); it != cols_union.end(); ++it) {
+        if (it != cols_union.begin()) std::cerr << ",";
+        std::cerr << *it;
+    }
+    std::cerr << std::endl;
+    // 2) Rows IoU computed on the intersection of columns:
+    //    - Build a canonical string key per row using only common columns (trimmed; optional lowercase)
+    //    - Compare sets of unique row keys across the two tables
+    if (!common_cols.empty()) {
+        std::multiset<std::string> set_a;
+        std::multiset<std::string> set_b;
+        std::cerr << "Set A: " << std::endl;
+        for (const auto &ra : a.rows) set_a.insert(make_key(common_cols, a, ra));
+        for (const auto &rb : b.rows) set_b.insert(make_key(common_cols, b, rb));
+        std::cerr << "Set B: " << std::endl;
+        for (const auto &rb : set_b) std::cerr << rb << std::endl;
+        std::multiset<std::string> rows_intersection = intersection_multiset(set_a, set_b);
+        std::multiset<std::string> rows_union = union_multiset(set_a, set_b);
+        s.rows_intersection_size = rows_intersection.size();
+        s.rows_union_size = rows_union.size();
+        s.rows_iou = (rows_union.size() > 0) ? static_cast<double>(rows_intersection.size()) / static_cast<double>(rows_union.size()) : 0.0;
+    }
+
+
+    // 3) Overall IoU = product (matches Python reference behavior)
+    s._overall_iou = s.columns_iou * s.rows_iou;
+
+    // Consider tables equal only under perfect match across columns and rows
+    s.equal = (s.columns_iou == 1.0) && (s.rows_iou == 1.0);
+    s.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    return s;
+}
+
 
 // Compare two tables:
 // - Validate column set equality (schema)
@@ -375,7 +476,7 @@ int main(int argc, char **argv) {
     if (!read_csv(opt.expected_path, te, err)) {
         DiffSummary s; s.error = err; print_json(s); return 2;
     }
-    auto summary = compare_tables(ta, te, opt);
+    auto summary = compare_tables_multiset(ta, te, opt);
     print_json(summary);
     return summary.equal ? 0 : 1;
 }
