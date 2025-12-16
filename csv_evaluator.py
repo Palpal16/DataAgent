@@ -2,7 +2,7 @@ import os
 import json
 from Agent.utils import *
 
-PREFIX = 'llama3-gpt'
+PREFIX = 'gptoss20-gpt'
 
 def make_csvs(dataset):
     for i in range(len(dataset)):

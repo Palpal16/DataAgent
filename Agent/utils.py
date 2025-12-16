@@ -49,7 +49,8 @@ def compare_csv(csv1_path, csv2_path):
     try:
         df1 = pd.read_csv(csv1_path)
         df2 = pd.read_csv(csv2_path)
-    except:
+    except Exception as e:
+        print(f"Error while loading csvs for evaluation: {e}") 
         return 0. , 0. , 0.
     
     # 1. Column names IoU
@@ -90,8 +91,9 @@ def best_of_n(agent, prompt: str, expected_csv: str=None, csv_path: str=None, n:
         temperatures = np.linspace(temperature[0], temperature[1], n)
     else:
         temperatures = [temperature] * n
-    max_score=-1
     original_temp = agent.llm.temperature
+    max_score=-1
+    min_score = 1
     for i,temp in enumerate(temperatures):
         print(f"\n--- Attempt {i+1}/{n} (temperature={temp:.2f}) ---")
         agent.llm.temperature = temp
@@ -103,18 +105,18 @@ def best_of_n(agent, prompt: str, expected_csv: str=None, csv_path: str=None, n:
             print(f"Columns Names IoU: {columns_names_iou:.2f} -- Rows IoU: {rows_iou:.2f} -- Data IoU: {data_iou:.2f}")
             score = (rows_iou + data_iou)/3
             print(f"Score: {score:.2f}")
-            if score>max_score:
-                max_score=score
+            min_score = min([min_score,data_iou])
+            if data_iou>max_score:
+                max_score=data_iou
                 best_result = {
                     'result': ret,
-                    'score': score,
-                    'temperature': temp,
-                    'attempt': i + 1
+                    'score': data_iou,
+                    'temperature': temp
                 }
         except Exception as e:
             print(f"Error in attempt {i+1}: {e}") 
 
     if max_score == -1:
-        return []
+        return [],0
     agent.llm.temperature = original_temp
-    return best_result
+    return best_result, max_score-min_score

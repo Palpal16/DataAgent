@@ -63,7 +63,6 @@ DEFAULT_DATA_PATH = os.path.join(
 class State(TypedDict):
     prompt: str
     data: Optional[str]
-    analyze_data: Optional[str]
     answer: List[str]
     visualization_goal: Optional[str]
     chart_config: Optional[dict]
@@ -148,6 +147,46 @@ def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
         print(f"Error accessing data: {str(e)}")
         return {**state, "data": "", "sql_query": sql_query, "error": f"Error accessing data: {str(e)}"}
 
+DATA_ANALYSIS_PROMPT = """ Your goal is to give a clear answer to this question: {prompt}.
+Use the information available and return only a direct answer to the question.
+The only data available is the data extracted from another agent using this SQL code: {sql_query}
+The output of the SQL you can use to answer is this data: {data}
+"""
+
+def analyzing_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
+    """Ask the LLM to analyze the looked-up data in the context of the prompt.
+
+    Args:
+        state: Conversation state; should include 'data' and 'prompt'.
+        llm: ChatOllama instance used for the analysis.
+
+    Returns:
+        Updated state including the analysis appended to 'answer'.
+    """
+    try:
+        #print("Data to analyze:\n", state.get("data", ""))
+        formatted_prompt = DATA_ANALYSIS_PROMPT.format(
+            data=state.get("data", ""), prompt=state.get("prompt", ""), sql_query=state.get("sql_query","")
+        )
+        analysis_result = llm.invoke(formatted_prompt)
+        analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
+        if tracer is not None:
+            try:
+                with tracer.start_as_current_span("data_analysis", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                    span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
+                    span.set_output(str(analysis_text))  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return {
+            **state,
+            "answer": state.get("answer", []) + [analysis_text],
+        }
+    except Exception as e:
+        print(f"Error analyzing data: {str(e)}")
+        return {**state, "error": f"Error accessing data: {str(e)}"}
+
 def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
     """Select the next tool to run given the current conversation state.
 
@@ -195,7 +234,6 @@ def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
         current_answer = state.get("answer", [])
         visualization_goal = state.get("visualization_goal")
         chart_config = state.get("chart_config")
-        analyzed_data = state.get("analyze_data")
 
         response = llm.invoke(decision_prompt)
         tool_choice = response.content.strip().lower()
@@ -230,7 +268,6 @@ def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
             **state,
             "prompt": current_prompt,
             "answer": current_answer,
-            "analyze_data": analyzed_data,
             "visualization_goal": visualization_goal,
             "chart_config": chart_config,
             "tool_choice": matched_tool,
@@ -238,12 +275,7 @@ def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
     except Exception as e:
         print(f"Error deciding tool: {str(e)}")
         return {**state, "error": f"Error accessing data: {str(e)}"}
-
-
-DATA_ANALYSIS_PROMPT = (
-    "Analyze the following data: {data}\n"
-    "Your job is to answer the following question: {prompt}"
-)
+    
 
 CHART_CONFIGURATION_PROMPT = (
     "Return a compact JSON object describing a chart configuration to visualize the data.\n"
@@ -316,7 +348,7 @@ def extract_chart_config(state: State, llm: ChatOllama) -> State:
     raw = response.content if hasattr(response, "content") else str(response)
     chart_config = _parse_chart_config(raw)
     chart_config["data"] = data_text
-    print("Este es el chart config: "+str(chart_config))
+    print("This is the cart_config: "+str(chart_config))
     return {**state, "chart_config": chart_config}
 
 
@@ -348,8 +380,8 @@ def create_chart(state: State, llm: ChatOllama) -> str:
     # clean any accidental fences
     return code.replace("```python", "").replace("```", "").strip()
 
-
-def create_visualization(state: State, llm: ChatOllama) -> State:
+    
+def create_visualization(state: State, llm: ChatOllama, tracer=None) -> State:
     """Create a visualization by first extracting config and then generating code.
 
     Args:
@@ -362,6 +394,15 @@ def create_visualization(state: State, llm: ChatOllama) -> State:
     try:
         with_config = extract_chart_config(state, llm)
         code = create_chart(with_config, llm)
+        if tracer is not None:
+            try:
+                with tracer.start_as_current_span("gen_visualization", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                    span.set_input(str(state.get("prompt", "")))  # type: ignore[attr-defined]
+                    span.set_output(str(code))  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         return {
             **with_config,
             "answer": with_config.get("answer", []) + [code],
@@ -485,75 +526,10 @@ class SalesDataAgent:
         llm = self.llm
         tracer = self.tracer
 
-        def analyzing_data_node(state: State) -> Dict:
-            """Ask the LLM to analyze the looked-up data in the context of the prompt.
-
-            Args:
-                state: Conversation state; should include 'data' and 'prompt'.
-                llm: ChatOllama instance used for the analysis.
-
-            Returns:
-                Updated state including 'analyze_data' and the analysis appended to 'answer'.
-            """
-            try:
-                print("Data to analyze:\n", state.get("data", ""))
-                formatted_prompt = DATA_ANALYSIS_PROMPT.format(
-                    data=state.get("data", ""), prompt=state.get("prompt", "")
-                )
-                analysis_result = llm.invoke(formatted_prompt)
-                analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
-                if tracer is not None:
-                    try:
-                        with tracer.start_as_current_span("data_analysis", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
-                            span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
-                            span.set_output(str(analysis_text))  # type: ignore[attr-defined]
-                            if StatusCode is not None:
-                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-                return {
-                    **state,
-                    "analyze_data": analysis_text,
-                    "answer": state.get("answer", []) + [analysis_text],
-                }
-            except Exception as e:
-                print(f"Error analyzing data: {str(e)}")
-                return {**state, "error": f"Error accessing data: {str(e)}"}
-
-        def create_visualization_node(state: State) -> Dict:
-            """Create a visualization by first extracting config and then generating code.
-
-            Args:
-                state: Conversation state; should include 'data'.
-                llm: ChatOllama instance used for config extraction and code generation.
-
-            Returns:
-                Updated state with 'chart_config' and the generated code appended to 'answer'.
-            """
-            try:
-                with_config = extract_chart_config(state, llm)
-                code = create_chart(with_config, llm)
-                if tracer is not None:
-                    try:
-                        with tracer.start_as_current_span("gen_visualization", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
-                            span.set_input(str(state.get("prompt", "")))  # type: ignore[attr-defined]
-                            span.set_output(str(code))  # type: ignore[attr-defined]
-                            if StatusCode is not None:
-                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-                return {
-                    **with_config,
-                    "answer": with_config.get("answer", []) + [code],
-                }
-            except Exception as e:
-                print(f"Error creating visualization: {str(e)}")
-                return {**state, "error": f"Error accessing data: {str(e)}"}
-
         graph.add_node("decide_tool", partial(decide_tool, llm=llm, tracer=tracer))
         graph.add_node("lookup_sales_data", partial(lookup_sales_data, llm=llm, tracer=tracer))
-        graph.add_node("analyzing_data", analyzing_data_node)
-        graph.add_node("create_visualization", create_visualization_node)
+        graph.add_node("analyzing_data", partial(analyzing_data, llm=llm, tracer=tracer))
+        graph.add_node("create_visualization", partial(create_visualization, llm=llm, tracer=tracer))
         graph.set_entry_point("decide_tool")
 
         graph.add_conditional_edges(
@@ -578,15 +554,14 @@ class SalesDataAgent:
         prompt: str,
         *,
         visualization_goal: Optional[str] = None,
-        initial_state: Optional[Dict] = None,
-        only_lookup: bool = False
+        only_lookup: bool = False,
+        no_vis: bool = False
     ) -> Dict:
         """Execute the agent for a single prompt.
 
         Args:
             prompt: Natural-language request or question.
             visualization_goal: Optional explicit goal for charts; defaults to the prompt.
-            initial_state: Optional seed state to merge in before execution.
 
         Returns:
             The final state dictionary produced by the compiled graph execution.
@@ -604,8 +579,6 @@ class SalesDataAgent:
         else:
             if visualization_goal:
                 state["visualization_goal"] = visualization_goal
-            if initial_state:
-                state.update(initial_state)
             # Shortcut: run only the lookup tool
             if only_lookup:
                 print("[Agent] Running only lookup_sales_data")
@@ -623,6 +596,28 @@ class SalesDataAgent:
                         return result
                 except Exception as _e:
                     return {**state, "error": f"Lookup failed: {str(_e)}"}
+            if no_vis:
+                print("[Agent] Running agent without visualization")
+                try:
+                    if self.tracing_enabled and self.tracer is not None:
+                        with self.tracer.start_as_current_span("AgentRun_NoVis", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                            span.set_input(state)  # type: ignore[attr-defined]
+                            state = lookup_sales_data(state, self.llm, self.tracer)
+                            result = analyzing_data(state, self.llm, self.tracer)
+                            print(f"\nAgent response: {result.get('answer', [None])[0]}")
+                            span.set_output(result)  # type: ignore[attr-defined]
+                            if StatusCode is not None:
+                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                            return result
+                    else:
+                        state = lookup_sales_data(state, self.llm)
+                        result = analyzing_data(state, self.llm, self.tracer)
+                        print(f"\nAgent response: {result.get('answer', [None])[0]}")
+                        return result
+                except Exception as _e:
+                    print(f"Lookup failed: {str(_e)}")
+                    return {**state, "error": f"Lookup failed: {str(_e)}"}
+
             print("Running the graph...")
             if self.tracing_enabled and self.tracer is not None:
                 try:
@@ -630,6 +625,7 @@ class SalesDataAgent:
                         print("[LangGraph] Starting LangGraph execution with tracing")
                         span.set_input(state)  # type: ignore[attr-defined]
                         result = self.graph.invoke(state)
+                        print(f"\nAgent response: {result.get('answer', [])}")
                         span.set_output(result)  # type: ignore[attr-defined]
                         if StatusCode is not None:
                             span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
@@ -638,6 +634,7 @@ class SalesDataAgent:
                 except Exception:
                     # Fallback to non-traced execution on any tracing error
                     result = self.graph.invoke(state)
+                    print(f"\nAgent response: {result.get('answer', [])}")
                     return result
             else:
                 print("[LangGraph] Starting LangGraph execution")
@@ -666,15 +663,17 @@ if __name__ == "__main__":
     parser.add_argument("--data", dest="data_path", type=str, default=DEFAULT_DATA_PATH, help="Path to parquet file")
     parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional viz goal")
     parser.add_argument("--model", dest="model", type=str, default="llama3.2:3b", help="Ollama model name (e.g., llama3.2:3b)")
-    # Only-lookup flag
+    # Only-lookup & No-vis flags
     parser.add_argument("--lookup-only", dest="lookup_only", action="store_true", help="Run only the lookup_sales_data tool")
+    parser.add_argument("--lookup-agent", dest="no_vis", action="store_true", help="Run only the lookup_sales_data tool and the model that gives an answers based on the lookup")
     args = parser.parse_args()
 
     agent = SalesDataAgent(model=args.model, data_path=args.data_path)
     output = agent.run(
         args.prompt,
         visualization_goal=args.visualization_goal,
-        only_lookup=args.lookup_only
+        only_lookup=args.lookup_only,
+        no_vis = args.no_vis
     )
     # Minimal printout
     print(json.dumps({k: v for k, v in output.items() if k != "data"}, indent=2))
