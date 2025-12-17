@@ -275,3 +275,35 @@ Notes:
 4. Visualize (LLM): emit compact config → generate matplotlib code to plot.
 
 The agent exposes a single `run(prompt, visualization_goal=None, initial_state=None)` entry point and returns the final state with an ordered `answer` list (analysis and then chart code when applicable).
+
+---
+
+## Energy and emissions (CodeCarbon)
+
+This project integrates [CodeCarbon](https://mlco2.github.io/codecarbon/) to estimate energy usage and CO₂ emissions for each agent run.
+
+- Enabled inside `SalesDataAgent.run(...)` via `EmissionsTracker`.
+- Every execution writes a row to `codecarbon/emissions.csv` in the current working directory.
+
+Install (already included if you use the project requirements):
+```powershell
+pip install -r requirements.txt
+# or
+pip install codecarbon
+```
+
+Run the agent as usual (CLI or API). After a run, inspect the log:
+```powershell
+Get-ChildItem codecarbon
+type codecarbon\emissions.csv
+```
+
+Optional dashboard (Carbonboard):
+```powershell
+carbonboard --filepath "codecarbon/emissions.csv" --port 8050
+```
+Open `http://localhost:8050/`.
+
+Notes:
+- On Windows, CodeCarbon works without special drivers; it may use modeled power if sensors are unavailable.
+- Logs are estimates; keep the machine plugged in and avoid heavy background tasks for more stable readings.

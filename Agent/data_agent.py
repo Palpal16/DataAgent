@@ -26,6 +26,16 @@ import duckdb
 import pandas as pd
 from typing_extensions import NotRequired, TypedDict
 
+# Optional energy/emissions tracking via CodeCarbon
+try:
+    from codecarbon import EmissionsTracker  # type: ignore
+    print("CodeCarbon is available")
+    _CODECARBON_AVAILABLE = True
+except Exception:
+    print("CodeCarbon is not available not using it")
+    EmissionsTracker = None  # type: ignore
+    _CODECARBON_AVAILABLE = False
+
 from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
 
@@ -573,6 +583,63 @@ class SalesDataAgent:
         
         return graph.compile()
 
+    def _run_core(
+        self,
+        state: Dict,
+        visualization_goal: Optional[str],
+        initial_state: Optional[Dict],
+        only_lookup: bool,
+    ) -> Dict:
+        """Core execution logic for a single agent run.
+
+        Kept separate from `run` so that wrappers like CodeCarbon or tracing
+        can be applied cleanly around this method.
+        """
+        if visualization_goal:
+            state["visualization_goal"] = visualization_goal
+        if initial_state:
+            state.update(initial_state)
+
+        # Shortcut: run only the lookup tool
+        if only_lookup:
+            print("[Agent] Running only lookup_sales_data")
+            try:
+                if self.tracing_enabled and self.tracer is not None:
+                    with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                        span.set_input(state)  # type: ignore[attr-defined]
+                        result = lookup_sales_data(state, self.llm, self.tracer)
+                        span.set_output(result)  # type: ignore[attr-defined]
+                        if StatusCode is not None:
+                            span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                        return result
+                else:
+                    result = lookup_sales_data(state, self.llm)
+                    return result
+            except Exception as _e:
+                return {**state, "error": f"Lookup failed: {str(_e)}"}
+
+        print("Running the graph...")
+        if self.tracing_enabled and self.tracer is not None:
+            try:
+                with self.tracer.start_as_current_span("AgentRun", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                    print("[LangGraph] Starting LangGraph execution with tracing")
+                    span.set_input(state)  # type: ignore[attr-defined]
+                    result = self.graph.invoke(state)
+                    span.set_output(result)  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                    print("[LangGraph] LangGraph execution completed")
+                    return result
+            except Exception:
+                # Fallback to non-traced execution on any tracing error
+                result = self.graph.invoke(state)
+                return result
+        else:
+            print("[LangGraph] Starting LangGraph execution")
+            result = self.graph.invoke(state)
+            print("[LangGraph] LangGraph execution completed")
+            return result
+
     def run(
         self,
         prompt: str,
@@ -602,48 +669,22 @@ class SalesDataAgent:
             print("Model is not running locally, remember to run ollama serve")
             return {**state, "error": "Model is not running locally, remember to run ollama serve"}
         else:
-            if visualization_goal:
-                state["visualization_goal"] = visualization_goal
-            if initial_state:
-                state.update(initial_state)
-            # Shortcut: run only the lookup tool
-            if only_lookup:
-                print("[Agent] Running only lookup_sales_data")
+            # Wrap the execution with CodeCarbon tracker if available
+            if _CODECARBON_AVAILABLE:
                 try:
-                    if self.tracing_enabled and self.tracer is not None:
-                        with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
-                            span.set_input(state)  # type: ignore[attr-defined]
-                            result = lookup_sales_data(state, self.llm, self.tracer)
-                            span.set_output(result)  # type: ignore[attr-defined]
-                            if StatusCode is not None:
-                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                            return result
-                    else:
-                        result = lookup_sales_data(state, self.llm)
-                        return result
-                except Exception as _e:
-                    return {**state, "error": f"Lookup failed: {str(_e)}"}
-            print("Running the graph...")
-            if self.tracing_enabled and self.tracer is not None:
-                try:
-                    with self.tracer.start_as_current_span("AgentRun", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
-                        print("[LangGraph] Starting LangGraph execution with tracing")
-                        span.set_input(state)  # type: ignore[attr-defined]
-                        result = self.graph.invoke(state)
-                        span.set_output(result)  # type: ignore[attr-defined]
-                        if StatusCode is not None:
-                            span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                        print("[LangGraph] LangGraph execution completed")
-                        return result
+                    with EmissionsTracker(  # type: ignore[call-arg]
+                        project_name="SalesDataAgent",
+                        output_dir="codecarbon",
+                        save_to_file=True,
+                        measure_power_secs=1,
+                        log_level="error",
+                    ):
+                        return self._run_core(state, visualization_goal, initial_state, only_lookup)
                 except Exception:
-                    # Fallback to non-traced execution on any tracing error
-                    result = self.graph.invoke(state)
-                    return result
+                    # If tracker initialization fails, run without it
+                    return self._run_core(state, visualization_goal, initial_state, only_lookup)
             else:
-                print("[LangGraph] Starting LangGraph execution")
-                result = self.graph.invoke(state)
-                print("[LangGraph] LangGraph execution completed")
-                return result
+                return self._run_core(state, visualization_goal, initial_state, only_lookup)
 
     def draw_graph(self) -> str:
         """Return an ASCII rendering of the compiled graph if available."""
