@@ -86,37 +86,249 @@ def compare_csv(csv1_path, csv2_path):
     
     return columns_names_iou, final_rows_iou, data_iou
 
-def best_of_n(agent, prompt: str, expected_csv: str=None, csv_path: str=None, n: int=3, temperature: float=0.1) -> Dict:
+def judge_analysis(
+    prompt: str,
+    sql_query: str,
+    data: str,
+    analysis: str,
+    judge_model: str = "gpt-oss:20b",
+    ollama_url: str = "http://localhost:11434"
+) -> Tuple[float, Dict]:
+    """Evaluate data analysis quality using LLM-as-a-Judge.
+    
+    Args:
+        prompt: Original user question
+        sql_query: SQL query that was executed
+        data: SQL results (ground truth)
+        analysis: LLM's analysis text to evaluate
+        judge_model: Ollama model name for judging (default: llama3.1:70b)
+        ollama_url: Ollama server URL
+    
+    Returns:
+        float: Overall score (0,1) = average of correctness, completeness, faithfulness and the detailed_evaluation of the judge
+    """
+    from langchain_ollama import ChatOllama
+    
+    JUDGE_PROMPT = """You are an expert evaluator assessing a data analysis response.
+For the evaluation is important you consider the information that was available for the analysis, if the SQL result is wrong or has missing data, this problem shouldn't affect the analysis score.
+
+### CONTEXT
+USER QUESTION: {prompt}
+SQL QUERY: {sql_query}
+SQL RESULTS: 
+{data}
+
+### ANALYSIS TO EVALUATE
+{analysis}
+
+### EVALUATION RUBRIC (Rate 1-5 for each)
+
+**CORRECTNESS (1-5)**
+Does the analysis accurately interpret the SQL results? Are numerical values correct?
+[1=Wrong, 3=Mostly correct, 5=Perfect]
+
+**COMPLETENESS (1-5)**
+Does it fully address all parts of the user's question using available data?
+[1=Incomplete, 3=Main points covered, 5=Comprehensive]
+
+**FAITHFULNESS (1-5)**
+Does it only use information from SQL results? No hallucinated facts?
+[1=Major hallucinations, 3=Minor issues, 5=Fully grounded]
+
+### OUTPUT
+Return ONLY valid JSON:
+{{
+  "correctness": {{"score": <1-5>, "reasoning": "<brief>", "issues": []}},
+  "completeness": {{"score": <1-5>, "reasoning": "<brief>", "missing": []}},
+  "faithfulness": {{"score": <1-5>, "reasoning": "<brief>", "hallucinations": []}}
+}}"""
+
+    try:
+        # Create judge LLM
+        judge_llm = ChatOllama(
+            model=judge_model,
+            temperature=0.2,
+            base_url=ollama_url,
+            max_tokens=1000
+        )
+        
+        # Truncate data if too long
+        truncated_data = data[:2000] if len(data) > 2000 else data
+        
+        # Get judgment
+        formatted_prompt = JUDGE_PROMPT.format(
+            prompt=prompt,
+            sql_query=sql_query,
+            data=truncated_data,
+            analysis=analysis
+        )
+        
+        response = judge_llm.invoke(formatted_prompt)
+        raw_content = response.content if hasattr(response, "content") else str(response)
+        
+        # Parse JSON
+        evaluation = _parse_judge_json(raw_content)
+        
+        # Compute overall score (average of 3 criteria)
+        scores = [
+            evaluation.get("correctness", {}).get("score", 0),
+            evaluation.get("completeness", {}).get("score", 0),
+            evaluation.get("faithfulness", {}).get("score", 0)
+        ]
+        score = sum(scores) / 3.0
+        overall_score = (score - 1) / 4.0
+        
+        evaluation["overall_score"] = overall_score
+        return overall_score, evaluation
+            
+    except Exception as e:
+        print(f"Judge evaluation error: {e}")
+        return (0.0, {"error": str(e)})
+
+
+def _parse_judge_json(raw_text: str) -> Dict:
+    """Parse judge JSON response with robust error handling."""
+    try:
+        # Clean markdown and find JSON
+        content = raw_text.strip().replace("``````", "").strip()
+        if content.lower().startswith("json"):
+            content = content[4:].strip()
+        
+        start = content.find("{")
+        end = content.rfind("}")
+        
+        if start != -1 and end != -1:
+            parsed = json.loads(content[start:end+1])
+            
+            # Ensure all criteria exist
+            for criterion in ["correctness", "completeness", "faithfulness"]:
+                if criterion not in parsed:
+                    parsed[criterion] = {"score": 0, "reasoning": "Missing", "issues": []}
+            
+            return parsed
+    except Exception as e:
+        print(f"JSON parse error: {e}")
+    
+    # Fallback
+    return {
+        "correctness": {"score": 0, "reasoning": "Parse failed", "issues": []},
+        "completeness": {"score": 0, "reasoning": "Parse failed", "missing": []},
+        "faithfulness": {"score": 0, "reasoning": "Parse failed", "hallucinations": []}
+    }
+
+
+def best_of_n(
+    agent, 
+    prompt: str, 
+    expected_csv: str = None, 
+    csv_path: str = None, 
+    n: int = 3, 
+    temperature: float = 0.1,
+    lookup_only: bool = False,
+    judge_model: str = "gpt-oss:20b"
+) -> Tuple[Dict, float]:
+    """Run agent n times and return best result based on evaluation score(s).
+    
+    Args:
+        agent: SalesDataAgent instance
+        prompt: User question
+        expected_csv: Path to ground truth CSV (for lookup evaluation)
+        csv_path: Path to save generated CSV
+        n: Number of attempts
+        temperature: Single float or (min, max) tuple for temperature range
+        lookup_only: If True, only run lookup+CSV eval; if False, run full agent with both evals
+        judge_model: Model name for LLM-as-a-judge evaluation
+    
+    Returns:
+        Tuple of (best_result_dict, score_variance)
+    """
+    # Temperature scheduling
     if isinstance(temperature, (list, tuple)) and len(temperature) == 2:
         temperatures = np.linspace(temperature[0], temperature[1], n)
     else:
         temperatures = [temperature] * n
+    
     original_temp = agent.llm.temperature
-    max_score=-1
-    min_score = 1
-    for i,temp in enumerate(temperatures):
+    best_result = None
+    max_score = -1
+    all_scores = []
+    
+    for i, temp in enumerate(temperatures):
         print(f"\n--- Attempt {i+1}/{n} (temperature={temp:.2f}) ---")
         agent.llm.temperature = temp
+        
         try:
-            ret = agent.run(prompt, only_lookup=True)
-            result_rows = text_to_csv(ret['data'])
-            save_csv(result_rows, csv_path)
-            columns_names_iou, rows_iou, data_iou = compare_csv(expected_csv, csv_path)
-            print(f"Columns Names IoU: {columns_names_iou:.2f} -- Rows IoU: {rows_iou:.2f} -- Data IoU: {data_iou:.2f}")
-            score = (rows_iou + data_iou)/3
-            print(f"Score: {score:.2f}")
-            min_score = min([min_score,data_iou])
-            if data_iou>max_score:
-                max_score=data_iou
+            # Run agent
+            if lookup_only:
+                ret = agent.run(prompt, only_lookup=True)
+            else:
+                ret = agent.run(prompt, no_vis=True)
+            
+            # Evaluation 1: CSV/Data IoU (if lookup data available)
+            csv_score = None
+            if expected_csv and csv_path and ret.get('data'):
+                try:
+                    result_rows = text_to_csv(ret['data'])
+                    save_csv(result_rows, csv_path)
+                    columns_names_iou, rows_iou, data_iou = compare_csv(expected_csv, csv_path)
+                    print(f"CSV Eval - Columns: {columns_names_iou:.2f} | Rows: {rows_iou:.2f} | Data: {data_iou:.2f}")
+                    csv_score = data_iou
+                except Exception as e:
+                    print(f"CSV evaluation failed: {e}")
+                    csv_score = 0.0
+            
+            # Evaluation 2: LLM-as-a-Judge (if analysis available)
+            judge_score = None
+            if not lookup_only and ret.get('answer'):
+                try:
+                    judge_score, details = judge_analysis(
+                        prompt=ret.get("prompt", prompt),
+                        sql_query=ret.get("sql_query", ""),
+                        data=ret.get("data", ""),
+                        analysis=ret.get("answer", [""])[0],
+                        judge_model=judge_model,
+                        ollama_url=agent.ollama_url
+                    )
+                    print(f"Judge Eval - Score: {judge_score:.2f}")
+                except Exception as e:
+                    print(f"Judge evaluation failed: {e}")
+                    judge_score = 0.0
+            
+            # Compute final score
+            if lookup_only:
+                # Only CSV score matters
+                final_score = csv_score if csv_score is not None else 0.0
+            else:
+                # Multiply both scores (both in 0-1 range)
+                csv_score = csv_score if csv_score is not None else 0.0
+                judge_score = judge_score if judge_score is not None else 0.0
+                final_score = csv_score * judge_score
+                print(f"Combined Score: {csv_score:.2f} × {judge_score:.2f} = {final_score:.2f}")
+            
+            all_scores.append(final_score)
+            
+            # Track best
+            if final_score > max_score:
+                max_score = final_score
                 best_result = {
                     'result': ret,
-                    'score': data_iou,
+                    'score': final_score,
+                    'csv_score': csv_score,
+                    'judge_score': judge_score,
                     'temperature': temp
                 }
+                
         except Exception as e:
-            print(f"Error in attempt {i+1}: {e}") 
-
-    if max_score == -1:
-        return [],0
+            print(f"Error in attempt {i+1}: {e}")
+            all_scores.append(0.0)
+    
+    # Restore original temperature
     agent.llm.temperature = original_temp
-    return best_result, max_score-min_score
+    
+    # Calculate variance
+    if not all_scores or max_score == -1:
+        return {}, 0.0
+    
+    score_variance = max(all_scores) - min(all_scores)
+    
+    return best_result, score_variance
