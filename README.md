@@ -1,6 +1,10 @@
 ## Sales Data Agent
 
-An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes the results, and generates visualization code. It uses a LangGraph workflow and an Ollama-hosted model (default: `llama3.2:3b`).
+An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes the results, and generates visualization code. It uses a LangGraph workflow and supports **multiple LLM providers**:
+
+- **Ollama (local, default)**: `llama3.2:3b`
+- **OpenAI (ChatGPT models)**: e.g. `openai:gpt-4o-mini`
+- **Anthropic (Claude models)**: e.g. `anthropic:claude-3-5-sonnet-latest`
 
 ### What it does
 - Lookup: converts natural language into SQL via the LLM and runs it on DuckDB over the parquet file at `data/Store_Sales_Price_Elasticity_Promotions_Data.parquet`.
@@ -11,12 +15,12 @@ An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes 
 
 ## Requirements
 - Python 3.10+
-- Ollama running locally (`https://ollama.com`) with a model pulled (default: `llama3.2:3b`)
+- Ollama running locally (`https://ollama.com`) with a model pulled (default: `llama3.2:3b`) **OR** an API key for OpenAI/Anthropic
 - Parquet file present at `data/Store_Sales_Price_Elasticity_Promotions_Data.parquet`
 
 Install Python deps (from the project root):
 ```powershell
-pip install langgraph langchain-ollama duckdb pandas pyarrow matplotlib
+pip install -r requirements.txt
 ```
 
 ---
@@ -66,6 +70,9 @@ DataAgent/
 from Agent.data_agent import SalesDataAgent
 
 agent = SalesDataAgent(
+    # Ollama (default): "llama3.2:3b"
+    # OpenAI: "openai:gpt-4o-mini" (requires OPENAI_API_KEY)
+    # Anthropic: "anthropic:claude-3-5-sonnet-latest" (requires ANTHROPIC_API_KEY)
     model="llama3.2:3b",
     temperature=0.1,
     max_tokens=2000,
@@ -161,6 +168,27 @@ You can override the parquet path:
 ```powershell
 python -m Agent.data_agent "Top products by revenue" --data "C:\path\to\your.parquet"
 ```
+
+### Save the lookup result to CSV (no analysis, no visualization)
+```powershell
+python -m Agent.data_agent "What were the sales in November 2021?" --lookup-only --output-csv "results/sales_november_2021.csv"
+```
+
+### Best-of-N self-consistency for SQL generation (lookup only)
+Runs the lookup \(N\) times with a temperature schedule and saves only the best attempt.
+```powershell
+python -m Agent.data_agent "What were the sales in November 2021?" --lookup-only `
+  --best-of-n 5 --best-of-n-temp-min 0.0 --best-of-n-temp-max 0.6 `
+  --output-csv "results/sales_november_2021.csv"
+```
+
+### Compare generated CSV vs a ground-truth CSV (IoU metrics)
+This uses a lightweight Python comparator (column/row/data IoU).
+```powershell
+python -m Agent.data_agent "What were the sales in November 2021?" --lookup-only `
+  --output-csv "results/sales_november_2021.csv" `
+  --expected-csv "results/real_sales_november_2021.csv"
+```
 ---
 
 ## Optional: Evaluate results with a C++ comparator
@@ -173,23 +201,25 @@ cmake --build build --config Release
 cd ..
 ```
 
-Run the agent and compare the produced table with an expected CSV:
+Run the agent and compare the produced CSV with an expected CSV (C++ comparator):
 ```powershell
-python -m Agent.data_agent "Weekly sales in 2021" \
-  --goal "Weekly trend" \
-  --expected-csv C:\path\to\expected.csv \
-  --evaluator-exe .\cpp_evaluator\build\resultcmp.exe \
-  --eval-keys week,store_id --eval-float-rel 1e-6 --eval-float-abs 1e-8
+python -m Agent.data_agent "Weekly sales in 2021" `
+  --lookup-only `
+  --output-csv "results/weekly_sales_2021.csv" `
+  --expected-csv "C:\path\to\expected.csv" `
+  --evaluator-exe ".\cpp_evaluator\build\resultcmp.exe" `
+  --eval-keys "week,store_id"
 ```
 
 PowerShell example with backtick continuations:
 ```powershell
 python -m Agent.data_agent "Weekly sales in 2021" `
-  --goal "Weekly trend" `
+  --lookup-only `
   --model "llama3.2:3b" `
-  --expected-csv C:\path\to\expected.csv `
-  --evaluator-exe .\cpp_evaluator\build\resultcmp.exe `
-  --eval-keys week,store_id --eval-float-rel 1e-6 --eval-float-abs 1e-8
+  --output-csv "results/weekly_sales_2021.csv" `
+  --expected-csv "C:\path\to\expected.csv" `
+  --evaluator-exe ".\cpp_evaluator\build\resultcmp.exe" `
+  --eval-keys "week,store_id"
 ```
 
 The final returned dict will include an `evaluation` field like:
@@ -251,10 +281,79 @@ Notes:
 
 ---
 
+## Download and Install Apache JMeter
+
+To perform load testing and performance analysis, you may want to use Apache JMeter. Follow these steps to download and install JMeter:
+
+1. **Download JMeter:**
+   - Visit the [Official Apache JMeter website](https://jmeter.apache.org/download_jmeter.cgi).
+   - Download the binary archive for your operating system (e.g., `apache-jmeter-5.4.1.zip`).
+   - Make sure to install java+8 [Java Download](https://www.java.com/en/download/manual.jsp)
+
+2. **Extract the Archive:**
+   - Extract the contents of the downloaded ZIP file to a directory of your choice. This directory will be your JMeter home. We created a folder and put in this project directly.
+
+3. **Run JMeter:**
+   - Navigate to the `bin` directory of your JMeter installation.
+   - Execute the following command to start JMeter's GUI:
+     - **Windows**:
+       ```bash
+       jmeter.bat
+       ```
+     - **macOS/Linux**:
+       ```bash
+       ./jmeter
+       ```
+
+4. **Verify the Installation:**
+   - Once JMeter starts, you should see the JMeter interface.
+   - You can now create test plans and perform load testing.
+
+---
+
 ## Configuration
 - Change model: pass `model="<name>"` to `SalesDataAgent(...)`.
 - Custom parquet: pass `data_path="..."` in the constructor, or use `--data` in CLI.
 - Visualization goal: pass `visualization_goal="..."` to `run()` or `--goal` in CLI.
+
+### LLM provider configuration (models)
+- **Ollama (default)**: `--model "llama3.2:3b"` (requires Ollama running; can override host with `OLLAMA_HOST`)
+- **OpenAI**: `--model "openai:gpt-4o-mini"` (requires `OPENAI_API_KEY`)
+- **Anthropic**: `--model "anthropic:claude-3-5-sonnet-latest"` (requires `ANTHROPIC_API_KEY`)
+
+Environment variables (PowerShell):
+```powershell
+$env:OPENAI_API_KEY="YOUR_KEY"
+$env:ANTHROPIC_API_KEY="YOUR_KEY"
+$env:OLLAMA_HOST="http://localhost:11434"
+```
+
+---
+
+## Run as an HTTP API (Flask)
+Start the server:
+```powershell
+python agent_api.py
+```
+
+Call the agent (example: lookup-only, best-of-n, save CSV, compare IoU):
+```powershell
+$body = @{
+  prompt = "What were the sales in November 2021?"
+  lookup_only = $true
+  best_of_n = 5
+  best_of_n_temp_min = 0.0
+  best_of_n_temp_max = 0.6
+  output_csv = "results/sales_november_2021.csv"
+  expected_csv = "results/real_sales_november_2021.csv"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5000/call-agent" -ContentType "application/json" -Body $body
+```
+
+Use the C++ comparator via the API by adding:
+- `evaluator_exe`: e.g. `".\cpp_evaluator\build\resultcmp.exe"`
+- `eval_keys`: e.g. `"week,store_id"`
 
 ---
 

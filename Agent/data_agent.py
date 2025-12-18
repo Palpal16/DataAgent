@@ -20,11 +20,16 @@ import json
 import os
 import difflib
 from functools import partial
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
 from typing_extensions import NotRequired, TypedDict
+# Support both `python -m Agent.data_agent ...` and running this file directly.
+try:
+    from .utils import text_to_csv, save_csv, compare_csv  # type: ignore
+except Exception:  # pragma: no cover
+    from Agent.utils import text_to_csv, save_csv, compare_csv  # type: ignore
 
 # Optional energy/emissions tracking via CodeCarbon
 try:
@@ -38,6 +43,11 @@ except Exception:
 
 from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
+
+import math
+import re
 
 # Optional tracing/instrumentation (Phoenix / OpenInference)
 try:
@@ -65,6 +75,49 @@ print(langgraph.version)
 DEFAULT_DATA_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data", "Store_Sales_Price_Elasticity_Promotions_Data.parquet"
 )
+
+def _build_llm(
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    streaming: bool,
+    ollama_url: str,
+) :
+    """Create an LLM client from a model string.
+
+    Supported:
+    - Ollama (default): model like "llama3.2:3b"
+    - OpenAI: model like "openai:gpt-4o-mini" or "gpt-4o-mini"
+    - Anthropic: model like "anthropic:claude-3-5-sonnet-latest" or "claude-3-5-sonnet-latest"
+    """
+    m = (model or "").strip()
+    m_lower = m.lower()
+
+    # Prefix-based selection
+    if m_lower.startswith("openai:"):
+        openai_model = m.split(":", 1)[1].strip()
+        return ChatOpenAI(model=openai_model, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
+
+    if m_lower.startswith("anthropic:") or m_lower.startswith("claude:"):
+        anthropic_model = m.split(":", 1)[1].strip()
+        return ChatAnthropic(model=anthropic_model, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
+
+    # Heuristic selection if no prefix provided
+    if m_lower.startswith("gpt-") or m_lower.startswith("o1-") or m_lower.startswith("o3-") or m_lower.startswith("chatgpt"):
+        return ChatOpenAI(model=m, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
+
+    if m_lower.startswith("claude-"):
+        return ChatAnthropic(model=m, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
+
+    # Default to Ollama
+    return ChatOllama(
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        streaming=streaming,
+        base_url=ollama_url,
+    )
 
 # -----------------------------
 # State Definition
@@ -95,7 +148,7 @@ Return only the SQL query, with no explanations or markdown formatting.
 
 
 
-def generate_sql_query(state: State, columns: List[str], table_name: str, llm: ChatOllama) -> str:
+def generate_sql_query(state: State, columns: List[str], table_name: str, llm) -> str:
     """Generate a parameterized SQL query with the LLM based on the user prompt.
 
     Args:
@@ -120,7 +173,7 @@ def generate_sql_query(state: State, columns: List[str], table_name: str, llm: C
     print("Generated SQL Query:\n", cleaned_sql)
     return cleaned_sql
 
-def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
+def _lookup_sales_data_once(state: State, llm, tracer=None, csv_output_path: Optional[str] = None) -> Dict:
     """Look up sales data from a parquet file using LLM-generated SQL over DuckDB.
 
     This function registers the parquet data as a temporary DuckDB table, asks the
@@ -144,6 +197,11 @@ def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
     try:
         result_df = duckdb.sql(sql_query).df()
         result_str = result_df.to_string()
+
+        # Save to CSV if output path is provided (prefer DataFrame->CSV for fidelity)
+        if csv_output_path:
+            os.makedirs(os.path.dirname(csv_output_path), exist_ok=True)
+            result_df.to_csv(csv_output_path, index=False)
         if tracer is not None:
             try:
                 with tracer.start_as_current_span("sql_query_exec", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
@@ -153,12 +211,140 @@ def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
                         span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
             except Exception:
                 pass
-        return {**state, "data": result_str, "sql_query": sql_query}
+        out = {**state, "data": result_str, "sql_query": sql_query}
+        if csv_output_path:
+            out["output_csv"] = csv_output_path
+        return out
     except Exception as e: # If the SQL fails, return empty results
         print(f"Error accessing data: {str(e)}")
         return {**state, "data": "", "sql_query": sql_query, "error": f"Error accessing data: {str(e)}"}
 
-def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
+def _score_lookup_result(result_df: Optional[pd.DataFrame], error: Optional[str]) -> Tuple[int, int, int]:
+    """Heuristic score for best-of-n selection.
+
+    Returns a tuple so Python's tuple comparison can pick the "best":
+    - ok_flag: 1 if no error else 0
+    - row_count: number of rows in result (higher is better)
+    - col_count: number of columns in result (higher is better)
+    """
+    ok_flag = 0 if error else 1
+    if result_df is None:
+        return (ok_flag, 0, 0)
+    try:
+        rows, cols = int(result_df.shape[0]), int(result_df.shape[1])
+    except Exception:
+        rows, cols = 0, 0
+    return (ok_flag, rows, cols)
+
+def lookup_sales_data(state: State, llm, tracer=None, csv_output_path: Optional[str] = None) -> Dict:
+    """Look up sales data (optionally using best-of-n for SQL generation)."""
+    # Allow passing the CSV output path via either:
+    # - function arg (csv_output_path=...)
+    # - state["output_csv"] (set by CLI/run)
+    if not csv_output_path:
+        try:
+            csv_output_path = state.get("output_csv")  # type: ignore[assignment]
+        except Exception:
+            csv_output_path = None
+
+    # Optional best-of-n self-consistency
+    best_of_n = 1
+    try:
+        best_of_n = int(state.get("best_of_n", 1))  # type: ignore[arg-type]
+    except Exception:
+        best_of_n = 1
+    best_of_n = max(1, best_of_n)
+
+    # Temperature schedule for best-of-n
+    try:
+        t_min = float(state.get("best_of_n_temp_min", getattr(llm, "temperature", 0.1) or 0.1))  # type: ignore[arg-type]
+    except Exception:
+        t_min = getattr(llm, "temperature", 0.1) or 0.1
+    try:
+        t_max = float(state.get("best_of_n_temp_max", t_min))  # type: ignore[arg-type]
+    except Exception:
+        t_max = t_min
+
+    if best_of_n <= 1:
+        return _lookup_sales_data_once(state, llm, tracer, csv_output_path=csv_output_path)
+
+    original_temp = getattr(llm, "temperature", None)
+    temps: List[float]
+    if best_of_n == 1:
+        temps = [t_min]
+    elif abs(t_max - t_min) < 1e-9:
+        temps = [t_min] * best_of_n
+    else:
+        # linear schedule
+        step = (t_max - t_min) / float(best_of_n - 1)
+        temps = [t_min + i * step for i in range(best_of_n)]
+
+    best_score: Tuple[int, int, int] = (-1, -1, -1)
+    best_state: Optional[Dict] = None
+
+    for i, temp in enumerate(temps):
+        try:
+            llm.temperature = float(temp)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        attempt_state = _lookup_sales_data_once(state, llm, tracer, csv_output_path=None)
+        err = attempt_state.get("error")
+        sql = attempt_state.get("sql_query")
+
+        # Re-run the SQL to get a DF for scoring (cheap, local DuckDB)
+        result_df: Optional[pd.DataFrame] = None
+        try:
+            if sql:
+                result_df = duckdb.sql(sql).df()
+        except Exception:
+            result_df = None
+
+        score = _score_lookup_result(result_df, err)
+        if score > best_score:
+            best_score = score
+            best_state = attempt_state
+
+        print(f"[best-of-n] attempt {i+1}/{best_of_n} temp={temp:.3f} score={score} error={bool(err)}")
+
+    # Restore temperature
+    try:
+        if original_temp is not None:
+            llm.temperature = original_temp  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    final_state = best_state or _lookup_sales_data_once(state, llm, tracer, csv_output_path=None)
+
+    # Save only the best attempt (if requested). Prefer best SQL -> DataFrame -> CSV.
+    if csv_output_path:
+        saved = False
+        try:
+            sql_best = final_state.get("sql_query")
+            if sql_best:
+                df_best = duckdb.sql(sql_best).df()
+                os.makedirs(os.path.dirname(csv_output_path), exist_ok=True)
+                df_best.to_csv(csv_output_path, index=False)
+                saved = True
+        except Exception:
+            saved = False
+
+        if not saved:
+            # Fallback to the older string->rows approach
+            try:
+                result_rows = text_to_csv(final_state.get("data", "") or "")
+                save_csv(result_rows, csv_output_path)
+                saved = True
+            except Exception as e:
+                final_state = {**final_state, "error": f"CSV save failed: {str(e)}"}
+
+        if saved:
+            final_state = {**final_state, "output_csv": csv_output_path}
+
+    final_state = {**final_state, "best_of_n": best_of_n, "best_of_n_temp_min": t_min, "best_of_n_temp_max": t_max}
+    return final_state
+
+def decide_tool(state: State, llm, tracer=None) -> State:
     """Select the next tool to run given the current conversation state.
 
     The LLM is prompted with the available tools and minimal state. The raw
@@ -255,6 +441,92 @@ DATA_ANALYSIS_PROMPT = (
     "Your job is to answer the following question: {prompt}"
 )
 
+
+def analyze_sales_data(state: State, llm, tracer=None) -> Dict:
+    """Run only the analysis step (expects state['data'] to be present)."""
+    try:
+        formatted_prompt = DATA_ANALYSIS_PROMPT.format(
+            data=state.get("data", ""), prompt=state.get("prompt", "")
+        )
+        analysis_result = llm.invoke(formatted_prompt)
+        analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
+        # Optional tracing
+        if tracer is not None:
+            try:
+                with tracer.start_as_current_span("data_analysis", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                    span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
+                    span.set_output(str(analysis_text))  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return {
+            **state,
+            "analyze_data": analysis_text,
+            "answer": state.get("answer", []) + [analysis_text],
+        }
+    except Exception as e:
+        return {**state, "error": f"Error analyzing data: {str(e)}"}
+
+
+def _tokenize_for_bleu(text: str) -> List[str]:
+    # Simple, dependency-free tokenization (words + numbers).
+    return re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", (text or "").lower())
+
+
+def bleu_score(reference: str, hypothesis: str, *, max_n: int = 4, smooth: bool = True) -> float:
+    """Compute a simple BLEU score (0..1) with optional add-one smoothing.
+
+    This is intended for quick evaluation of analysis text; it's not a full SacreBLEU replacement.
+    """
+    ref_tokens = _tokenize_for_bleu(reference)
+    hyp_tokens = _tokenize_for_bleu(hypothesis)
+    if not hyp_tokens:
+        return 0.0
+    if not ref_tokens:
+        return 0.0
+
+    def ngrams(tokens: List[str], n: int) -> List[Tuple[str, ...]]:
+        return [tuple(tokens[i : i + n]) for i in range(0, len(tokens) - n + 1)]
+
+    precisions: List[float] = []
+    for n in range(1, max_n + 1):
+        hyp_ngrams = ngrams(hyp_tokens, n)
+        ref_ngrams = ngrams(ref_tokens, n)
+        if not hyp_ngrams:
+            precisions.append(0.0)
+            continue
+        # Count ngrams
+        hyp_counts: Dict[Tuple[str, ...], int] = {}
+        ref_counts: Dict[Tuple[str, ...], int] = {}
+        for g in hyp_ngrams:
+            hyp_counts[g] = hyp_counts.get(g, 0) + 1
+        for g in ref_ngrams:
+            ref_counts[g] = ref_counts.get(g, 0) + 1
+        # Clipped matches
+        match = 0
+        total = 0
+        for g, c in hyp_counts.items():
+            total += c
+            match += min(c, ref_counts.get(g, 0))
+        if smooth:
+            precisions.append((match + 1.0) / (total + 1.0))
+        else:
+            precisions.append(match / total if total else 0.0)
+
+    # Brevity penalty
+    ref_len = len(ref_tokens)
+    hyp_len = len(hyp_tokens)
+    if hyp_len == 0:
+        return 0.0
+    bp = 1.0 if hyp_len > ref_len else math.exp(1.0 - (ref_len / hyp_len))
+
+    # Geometric mean of precisions
+    if any(p <= 0.0 for p in precisions):
+        return 0.0
+    log_mean = sum(math.log(p) for p in precisions) / float(max_n)
+    return float(bp * math.exp(log_mean))
+
 CHART_CONFIGURATION_PROMPT = (
     "Return a compact JSON object describing a chart configuration to visualize the data.\n"
     "Keys: chart_type (bar|line|area|scatter), x_axis (string), y_axis (string), title (string).\n"
@@ -301,7 +573,7 @@ def _parse_chart_config(raw_text: str) -> Dict[str, str]:
     }
 
 
-def extract_chart_config(state: State, llm: ChatOllama) -> State:
+def extract_chart_config(state: State, llm) -> State:
     """Infer a compact chart configuration from the looked-up data.
 
     Prompts the LLM to return a minified JSON config and parses it into a
@@ -341,7 +613,7 @@ CREATE_CHART_PROMPT = (
 )
 
 
-def create_chart(state: State, llm: ChatOllama) -> str:
+def create_chart(state: State, llm) -> str:
     """Ask the LLM to emit matplotlib code for the given chart configuration.
 
     Args:
@@ -359,7 +631,7 @@ def create_chart(state: State, llm: ChatOllama) -> str:
     return code.replace("```python", "").replace("```", "").strip()
 
 
-def create_visualization(state: State, llm: ChatOllama) -> State:
+def create_visualization(state: State, llm) -> State:
     """Create a visualization by first extracting config and then generating code.
 
     Args:
@@ -431,12 +703,16 @@ class SalesDataAgent:
             ollama_url: Optional override for Ollama base URL; defaults to OLLAMA_HOST or http://localhost:11434.
         """
         self.ollama_url = ollama_url or os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        self.llm = ChatOllama(
+        # LLM provider selection:
+        # - default: Ollama (local)
+        # - OpenAI: pass model like "openai:gpt-4o-mini" (requires OPENAI_API_KEY)
+        # - Anthropic: pass model like "anthropic:claude-3-5-sonnet-latest" (requires ANTHROPIC_API_KEY)
+        self.llm = _build_llm(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             streaming=streaming,
-            base_url=self.ollama_url,
+            ollama_url=self.ollama_url,
         )
         self.data_path = data_path or DEFAULT_DATA_PATH
 
@@ -589,6 +865,11 @@ class SalesDataAgent:
         visualization_goal: Optional[str],
         initial_state: Optional[Dict],
         only_lookup: bool,
+        output_csv: Optional[str] = None,
+        best_of_n: int = 1,
+        best_of_n_temp_min: Optional[float] = None,
+        best_of_n_temp_max: Optional[float] = None,
+        analyze_only: bool = False,
     ) -> Dict:
         """Core execution logic for a single agent run.
 
@@ -599,6 +880,22 @@ class SalesDataAgent:
             state["visualization_goal"] = visualization_goal
         if initial_state:
             state.update(initial_state)
+        if output_csv:
+            state["output_csv"] = output_csv
+        # Best-of-n config (consumed by lookup_sales_data)
+        try:
+            state["best_of_n"] = int(best_of_n)
+        except Exception:
+            state["best_of_n"] = 1
+        if best_of_n_temp_min is not None:
+            state["best_of_n_temp_min"] = float(best_of_n_temp_min)
+        if best_of_n_temp_max is not None:
+            state["best_of_n_temp_max"] = float(best_of_n_temp_max)
+
+        # Shortcut: run lookup then analysis only (no tool-routing / no visualization)
+        if analyze_only:
+            looked_up = lookup_sales_data(state, self.llm, self.tracer, csv_output_path=output_csv)
+            return analyze_sales_data(looked_up, self.llm, self.tracer)
 
         # Shortcut: run only the lookup tool
         if only_lookup:
@@ -607,13 +904,13 @@ class SalesDataAgent:
                 if self.tracing_enabled and self.tracer is not None:
                     with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
                         span.set_input(state)  # type: ignore[attr-defined]
-                        result = lookup_sales_data(state, self.llm, self.tracer)
+                        result = lookup_sales_data(state, self.llm, self.tracer, csv_output_path=output_csv)
                         span.set_output(result)  # type: ignore[attr-defined]
                         if StatusCode is not None:
                             span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
                         return result
                 else:
-                    result = lookup_sales_data(state, self.llm)
+                    result = lookup_sales_data(state, self.llm, csv_output_path=output_csv)
                     return result
             except Exception as _e:
                 return {**state, "error": f"Lookup failed: {str(_e)}"}
@@ -646,7 +943,12 @@ class SalesDataAgent:
         *,
         visualization_goal: Optional[str] = None,
         initial_state: Optional[Dict] = None,
-        only_lookup: bool = False
+        only_lookup: bool = False,
+        output_csv: Optional[str] = None,
+        best_of_n: int = 1,
+        best_of_n_temp_min: Optional[float] = None,
+        best_of_n_temp_max: Optional[float] = None,
+        analyze_only: bool = False,
     ) -> Dict:
         """Execute the agent for a single prompt.
 
@@ -679,12 +981,42 @@ class SalesDataAgent:
                         measure_power_secs=1,
                         log_level="error",
                     ):
-                        return self._run_core(state, visualization_goal, initial_state, only_lookup)
+                        return self._run_core(
+                            state,
+                            visualization_goal,
+                            initial_state,
+                            only_lookup,
+                            output_csv=output_csv,
+                            best_of_n=best_of_n,
+                            best_of_n_temp_min=best_of_n_temp_min,
+                            best_of_n_temp_max=best_of_n_temp_max,
+                            analyze_only=analyze_only,
+                        )
                 except Exception:
                     # If tracker initialization fails, run without it
-                    return self._run_core(state, visualization_goal, initial_state, only_lookup)
+                    return self._run_core(
+                        state,
+                        visualization_goal,
+                        initial_state,
+                        only_lookup,
+                        output_csv=output_csv,
+                        best_of_n=best_of_n,
+                        best_of_n_temp_min=best_of_n_temp_min,
+                        best_of_n_temp_max=best_of_n_temp_max,
+                        analyze_only=analyze_only,
+                    )
             else:
-                return self._run_core(state, visualization_goal, initial_state, only_lookup)
+                return self._run_core(
+                    state,
+                    visualization_goal,
+                    initial_state,
+                    only_lookup,
+                    output_csv=output_csv,
+                    best_of_n=best_of_n,
+                    best_of_n_temp_min=best_of_n_temp_min,
+                    best_of_n_temp_max=best_of_n_temp_max,
+                    analyze_only=analyze_only,
+                )
 
     def draw_graph(self) -> str:
         """Return an ASCII rendering of the compiled graph if available."""
@@ -709,14 +1041,75 @@ if __name__ == "__main__":
     parser.add_argument("--model", dest="model", type=str, default="llama3.2:3b", help="Ollama model name (e.g., llama3.2:3b)")
     # Only-lookup flag
     parser.add_argument("--lookup-only", dest="lookup_only", action="store_true", help="Run only the lookup_sales_data tool")
+    parser.add_argument('--output-csv', dest='output_csv', type=str, help='Path to save the output CSV file')
+    parser.add_argument("--best-of-n", dest="best_of_n", type=int, default=1, help="Run lookup N times (self-consistency) and pick the best SQL result")
+    parser.add_argument("--best-of-n-temp-min", dest="best_of_n_temp_min", type=float, default=None, help="Min temperature for best-of-n schedule")
+    parser.add_argument("--best-of-n-temp-max", dest="best_of_n_temp_max", type=float, default=None, help="Max temperature for best-of-n schedule")
+    parser.add_argument("--analyze-only", dest="analyze_only", action="store_true", help="Run lookup then analysis (no visualization)")
+    parser.add_argument("--expected-analysis", dest="expected_analysis", type=str, default=None, help="Ground-truth analysis text to compute BLEU against")
+    parser.add_argument("--expected-analysis-file", dest="expected_analysis_file", type=str, default=None, help="Path to a text file containing ground-truth analysis (BLEU)")
+    parser.add_argument("--expected-csv", dest="expected_csv", type=str, default=None, help="Path to ground-truth/expected CSV to compare against")
+    parser.add_argument("--evaluator-exe", dest="evaluator_exe", type=str, default=None, help="Path to C++ comparator executable (optional)")
+    parser.add_argument("--eval-keys", dest="eval_keys", type=str, default=None, help="Comma-separated key columns for C++ comparator (optional)")
     args = parser.parse_args()
 
     agent = SalesDataAgent(model=args.model, data_path=args.data_path)
     output = agent.run(
         args.prompt,
         visualization_goal=args.visualization_goal,
-        only_lookup=args.lookup_only
+        only_lookup=args.lookup_only,
+        output_csv=args.output_csv,
+        best_of_n=args.best_of_n,
+        best_of_n_temp_min=args.best_of_n_temp_min,
+        best_of_n_temp_max=args.best_of_n_temp_max,
+        analyze_only=args.analyze_only,
     )
+
+    # Optional: analysis BLEU evaluation (generated analysis vs expected analysis)
+    expected_analysis_text = args.expected_analysis
+    if not expected_analysis_text and args.expected_analysis_file:
+        try:
+            with open(args.expected_analysis_file, "r", encoding="utf-8") as f:
+                expected_analysis_text = f.read()
+        except Exception as e:
+            output["analysis_evaluation"] = {"error": f"Failed to read expected analysis file: {str(e)}"}
+            expected_analysis_text = None
+
+    if expected_analysis_text is not None:
+        try:
+            hyp = output.get("analyze_data") or ""
+            output["analysis_evaluation"] = {
+                "metric": "bleu",
+                "bleu": bleu_score(expected_analysis_text, hyp, max_n=4, smooth=True),
+            }
+        except Exception as e:
+            output["analysis_evaluation"] = {"error": f"BLEU evaluation failed: {str(e)}"}
+
+    # Optional: compare actual vs expected CSV (IoU by default, C++ comparator if --evaluator-exe is provided)
+    if args.expected_csv:
+        actual_csv = args.output_csv or output.get("output_csv")
+        try:
+            if args.evaluator_exe:
+                from evaluator import run_cpp_comparator  # type: ignore
+
+                keys = [k.strip() for k in (args.eval_keys or "").split(",") if k.strip()] or None
+                output["evaluation"] = run_cpp_comparator(
+                    evaluator_exe=args.evaluator_exe,
+                    actual_csv=str(actual_csv),
+                    expected_csv=str(args.expected_csv),
+                    keys=keys,
+                )
+            else:
+                c_iou, r_iou, d_iou = compare_csv(str(args.expected_csv), str(actual_csv))
+                output["evaluation"] = {
+                    "mode": "iou",
+                    "columns_iou": c_iou,
+                    "rows_iou": r_iou,
+                    "data_iou": d_iou,
+                }
+        except Exception as e:
+            output["evaluation"] = {"equal": False, "error": f"Evaluation failed: {str(e)}"}
+
     # Minimal printout
     print(json.dumps({k: v for k, v in output.items() if k != "data"}, indent=2))
 
