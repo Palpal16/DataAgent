@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from Agent.data_agent import SalesDataAgent
+from Agent.utils import bleu_score, bleu_score_nltk, spice_score_java, check_spice_jar_runnable
 
 app = Flask(__name__)
 agent = SalesDataAgent()
@@ -16,7 +17,6 @@ def call_agent():
     data_path = payload.get("data_path") or payload.get("data")
     model = payload.get("model")
     lookup_only = bool(payload.get("lookup_only") or payload.get("lookup-only") or payload.get("lookupOnly") or False)
-    analyze_only = bool(payload.get("analyze_only") or payload.get("analyze-only") or payload.get("analyzeOnly") or False)
     output_csv = payload.get("output_csv") or payload.get("output-csv")
 
     best_of_n = payload.get("best_of_n") or payload.get("best-of-n") or 1
@@ -26,8 +26,19 @@ def call_agent():
     expected_csv = payload.get("expected_csv") or payload.get("expected-csv")
     evaluator_exe = payload.get("evaluator_exe") or payload.get("evaluator-exe")
     eval_keys = payload.get("eval_keys") or payload.get("eval-keys")
-
+    analyze_only = bool(payload.get("analyze_only") or payload.get("analyze-only") or payload.get("analyzeOnly") or False)
     expected_analysis = payload.get("expected_analysis") or payload.get("expected-analysis")
+    bleu_impl = (payload.get("bleu_impl") or payload.get("bleu-impl") or "simple")
+    analysis_metric = (payload.get("analysis_metric") or payload.get("analysis-metric") or "bleu")
+    spice_jar = payload.get("spice_jar") or payload.get("spice-jar")
+    spice_cache_dir = payload.get("spice_cache_dir") or payload.get("spice-cache-dir") or "spice_cache"
+    spice_java_bin = payload.get("spice_java_bin") or payload.get("spice-java-bin") or "java"
+    # Fail fast for SPICE (avoid running LLM/DuckDB if jar is missing/unrunnable)
+    if str(analysis_metric).lower() == "spice":
+        try:
+            check_spice_jar_runnable(spice_jar=str(spice_jar or ""), java_bin=str(spice_java_bin))
+        except Exception as e:
+            return jsonify({"error": f"SPICE precheck failed: {str(e)}"}), 400
 
     # Allow per-request agent overrides (optional)
     req_agent = agent
@@ -49,17 +60,31 @@ def call_agent():
         best_of_n_temp_max=float(best_of_n_temp_max) if best_of_n_temp_max is not None else None,
     )
 
-    # Optional analysis BLEU
+    # Optional analysis evaluation (generated analysis vs expected analysis)
     if expected_analysis is not None:
         try:
-            from Agent.data_agent import bleu_score
             hyp = result.get("analyze_data") or ""
-            result["analysis_evaluation"] = {
-                "metric": "bleu",
-                "bleu": bleu_score(str(expected_analysis), str(hyp), max_n=4, smooth=True),
-            }
+            if str(analysis_metric).lower() == "spice":
+                if not spice_jar:
+                    raise ValueError("SPICE selected but spice_jar was not provided")
+                spice_val = spice_score_java(
+                    str(expected_analysis),
+                    str(hyp),
+                    spice_jar=str(spice_jar),
+                    cache_dir=str(spice_cache_dir),
+                    java_bin=str(spice_java_bin),
+                )
+                result["analysis_evaluation"] = {"metric": "spice", "impl": "java", "spice": spice_val}
+            else:
+                if str(bleu_impl).lower() == "nltk":
+                    bleu_val = bleu_score_nltk(str(expected_analysis), str(hyp), max_n=4, smooth=True)
+                    impl = "nltk"
+                else:
+                    bleu_val = bleu_score(str(expected_analysis), str(hyp), max_n=4, smooth=True)
+                    impl = "simple"
+                result["analysis_evaluation"] = {"metric": "bleu", "impl": impl, "bleu": bleu_val}
         except Exception as e:
-            result["analysis_evaluation"] = {"error": f"BLEU evaluation failed: {str(e)}"}
+            result["analysis_evaluation"] = {"error": f"Analysis evaluation failed: {str(e)}"}
 
     # Optional comparison (if requested)
     if expected_csv:

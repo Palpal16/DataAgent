@@ -357,6 +357,39 @@ Use the C++ comparator via the API by adding:
 
 ---
 
+## Optional: SPICE (Java) for analysis-text evaluation
+
+SPICE is a **semantic scene-graph** metric originally designed for **image captions**. You *can* apply it to short, caption-like analysis outputs, but it may be noisy on long analytical text.
+
+### Prerequisites
+- **Java** installed (`java -version`)
+- A SPICE jar file (e.g., `spice-1.0.jar`) downloaded from the official repo(https://panderson.me/spice/).
+
+### CLI example (analyze-only + SPICE)
+```powershell
+python -m Agent.data_agent "What were the sum of sales in November 2021?" `
+  --analyze-only `
+  --expected-analysis-file "results/expected_analysis.txt" `
+  --analysis-metric spice `
+  --spice-jar "spice/spice-1.0.jar" `
+  --spice-cache-dir "spice_cache"
+```
+
+### API example (SPICE)
+```json
+{
+  "prompt": "What were the sum of sales in November 2021?",
+  "analyze_only": true,
+  "expected_analysis": "…ground truth…",
+  "analysis_metric": "spice",
+  "spice_jar": "spice/spice-1.0.jar",
+  "spice_cache_dir": "spice_cache",
+  "spice_java_bin": "java"
+}
+```
+
+---
+
 ## Troubleshooting
 - Check Ollama is up:
   - `curl http://localhost:11434/api/version`

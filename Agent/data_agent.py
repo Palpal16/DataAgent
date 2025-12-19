@@ -27,9 +27,9 @@ import pandas as pd
 from typing_extensions import NotRequired, TypedDict
 # Support both `python -m Agent.data_agent ...` and running this file directly.
 try:
-    from .utils import text_to_csv, save_csv, compare_csv  # type: ignore
+    from .utils import text_to_csv, save_csv, compare_csv, bleu_score, bleu_score_nltk, spice_score_java, check_spice_jar_runnable  # type: ignore
 except Exception:  # pragma: no cover
-    from Agent.utils import text_to_csv, save_csv, compare_csv  # type: ignore
+    from Agent.utils import text_to_csv, save_csv, compare_csv, bleu_score, bleu_score_nltk, spice_score_java, check_spice_jar_runnable  # type: ignore
 
 # Optional energy/emissions tracking via CodeCarbon
 try:
@@ -45,9 +45,6 @@ from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
-
-import math
-import re
 
 # Optional tracing/instrumentation (Phoenix / OpenInference)
 try:
@@ -468,64 +465,6 @@ def analyze_sales_data(state: State, llm, tracer=None) -> Dict:
     except Exception as e:
         return {**state, "error": f"Error analyzing data: {str(e)}"}
 
-
-def _tokenize_for_bleu(text: str) -> List[str]:
-    # Simple, dependency-free tokenization (words + numbers).
-    return re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", (text or "").lower())
-
-
-def bleu_score(reference: str, hypothesis: str, *, max_n: int = 4, smooth: bool = True) -> float:
-    """Compute a simple BLEU score (0..1) with optional add-one smoothing.
-
-    This is intended for quick evaluation of analysis text; it's not a full SacreBLEU replacement.
-    """
-    ref_tokens = _tokenize_for_bleu(reference)
-    hyp_tokens = _tokenize_for_bleu(hypothesis)
-    if not hyp_tokens:
-        return 0.0
-    if not ref_tokens:
-        return 0.0
-
-    def ngrams(tokens: List[str], n: int) -> List[Tuple[str, ...]]:
-        return [tuple(tokens[i : i + n]) for i in range(0, len(tokens) - n + 1)]
-
-    precisions: List[float] = []
-    for n in range(1, max_n + 1):
-        hyp_ngrams = ngrams(hyp_tokens, n)
-        ref_ngrams = ngrams(ref_tokens, n)
-        if not hyp_ngrams:
-            precisions.append(0.0)
-            continue
-        # Count ngrams
-        hyp_counts: Dict[Tuple[str, ...], int] = {}
-        ref_counts: Dict[Tuple[str, ...], int] = {}
-        for g in hyp_ngrams:
-            hyp_counts[g] = hyp_counts.get(g, 0) + 1
-        for g in ref_ngrams:
-            ref_counts[g] = ref_counts.get(g, 0) + 1
-        # Clipped matches
-        match = 0
-        total = 0
-        for g, c in hyp_counts.items():
-            total += c
-            match += min(c, ref_counts.get(g, 0))
-        if smooth:
-            precisions.append((match + 1.0) / (total + 1.0))
-        else:
-            precisions.append(match / total if total else 0.0)
-
-    # Brevity penalty
-    ref_len = len(ref_tokens)
-    hyp_len = len(hyp_tokens)
-    if hyp_len == 0:
-        return 0.0
-    bp = 1.0 if hyp_len > ref_len else math.exp(1.0 - (ref_len / hyp_len))
-
-    # Geometric mean of precisions
-    if any(p <= 0.0 for p in precisions):
-        return 0.0
-    log_mean = sum(math.log(p) for p in precisions) / float(max_n)
-    return float(bp * math.exp(log_mean))
 
 CHART_CONFIGURATION_PROMPT = (
     "Return a compact JSON object describing a chart configuration to visualize the data.\n"
@@ -1048,10 +987,23 @@ if __name__ == "__main__":
     parser.add_argument("--analyze-only", dest="analyze_only", action="store_true", help="Run lookup then analysis (no visualization)")
     parser.add_argument("--expected-analysis", dest="expected_analysis", type=str, default=None, help="Ground-truth analysis text to compute BLEU against")
     parser.add_argument("--expected-analysis-file", dest="expected_analysis_file", type=str, default=None, help="Path to a text file containing ground-truth analysis (BLEU)")
+    parser.add_argument("--bleu-impl", dest="bleu_impl", type=str, default="simple", choices=["simple", "nltk"], help="BLEU implementation to use for analysis evaluation")
+    parser.add_argument("--analysis-metric", dest="analysis_metric", type=str, default="bleu", choices=["bleu", "spice"], help="Metric to evaluate analysis text")
+    parser.add_argument("--spice-jar", dest="spice_jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar) to compute SPICE")
+    parser.add_argument("--spice-cache-dir", dest="spice_cache_dir", type=str, default="spice_cache", help="Cache directory for SPICE")
+    parser.add_argument("--spice-java-bin", dest="spice_java_bin", type=str, default="java", help="Java executable for SPICE (default: java)")
     parser.add_argument("--expected-csv", dest="expected_csv", type=str, default=None, help="Path to ground-truth/expected CSV to compare against")
     parser.add_argument("--evaluator-exe", dest="evaluator_exe", type=str, default=None, help="Path to C++ comparator executable (optional)")
     parser.add_argument("--eval-keys", dest="eval_keys", type=str, default=None, help="Comma-separated key columns for C++ comparator (optional)")
     args = parser.parse_args()
+
+    # Fail fast if user requested SPICE (avoid running LLM/DuckDB first)
+    if args.analysis_metric == "spice":
+        try:
+            check_spice_jar_runnable(spice_jar=args.spice_jar, java_bin=args.spice_java_bin)
+        except Exception as e:
+            print(json.dumps({"error": f"SPICE precheck failed: {str(e)}"}, indent=2))
+            raise SystemExit(2)
 
     agent = SalesDataAgent(model=args.model, data_path=args.data_path)
     output = agent.run(
@@ -1078,12 +1030,33 @@ if __name__ == "__main__":
     if expected_analysis_text is not None:
         try:
             hyp = output.get("analyze_data") or ""
-            output["analysis_evaluation"] = {
-                "metric": "bleu",
-                "bleu": bleu_score(expected_analysis_text, hyp, max_n=4, smooth=True),
-            }
+            if args.analysis_metric == "spice":
+                if not args.spice_jar:
+                    raise ValueError("SPICE selected but --spice-jar was not provided")
+                spice_val = spice_score_java(
+                    expected_analysis_text,
+                    hyp,
+                    spice_jar=args.spice_jar,
+                    cache_dir=args.spice_cache_dir,
+                    java_bin=args.spice_java_bin,
+                )
+                output["analysis_evaluation"] = {
+                    "metric": "spice",
+                    "impl": "java",
+                    "spice": spice_val,
+                }
+            else:
+                if args.bleu_impl == "nltk":
+                    bleu_val = bleu_score_nltk(expected_analysis_text, hyp, max_n=4, smooth=True)
+                else:
+                    bleu_val = bleu_score(expected_analysis_text, hyp, max_n=4, smooth=True)
+                output["analysis_evaluation"] = {
+                    "metric": "bleu",
+                    "impl": args.bleu_impl,
+                    "bleu": bleu_val,
+                }
         except Exception as e:
-            output["analysis_evaluation"] = {"error": f"BLEU evaluation failed: {str(e)}"}
+            output["analysis_evaluation"] = {"error": f"Analysis evaluation failed: {str(e)}"}
 
     # Optional: compare actual vs expected CSV (IoU by default, C++ comparator if --evaluator-exe is provided)
     if args.expected_csv:

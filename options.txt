@@ -18,3 +18,21 @@ python -m Agent.data_agent "What were the sales in November 2021?" `
   data-agent "What were the sales in November 2021?" --lookup-only --output-csv "results/sales_november_2021.csv"
 
   python agent_api.py
+
+python -m Agent.data_agent "What were the sum of sales in November 2021?" `
+  --analyze-only `
+  --output-csv "results/sales_november_2021.csv" `
+  --expected-csv "results/real_sales_november_2021.csv" `
+  --eval-keys "week,store_id" `
+  --expected-analysis-file "results/expected_analysis.txt" `
+  --bleu-impl nltk
+
+  python -m Agent.data_agent "What were the sum of sales in November 2021?" `
+  --analyze-only `
+  --output-csv "results/sales_november_2021.csv" `
+  --expected-csv "results/real_sales_november_2021.csv" `
+  --eval-keys "week,store_id" `
+  --expected-analysis-file "results/expected_analysis.txt" `
+  --analysis-metric spice `
+  --spice-jar "./SPICE-1.0/spice-1.0.jar" `
+  --spice-cache-dir "spice_cache"

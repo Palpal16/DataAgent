@@ -1,0 +1,2 @@
+The total sales in November 2021 were: 499,984.43 
+This is the sum of all values in the Total_Sale_Value column.

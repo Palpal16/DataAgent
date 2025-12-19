@@ -47,3 +47,4 @@ typing_extensions
 requests
 codecarbon
 flask
+nltk
