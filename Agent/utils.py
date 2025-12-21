@@ -244,6 +244,23 @@ def check_spice_jar_runnable(
                 "(both the code jar and the models jar)."
             )
 
+        # On Windows, SPICE uses LMDB JNI. The bundle provides a win64 JNI jar; if Java is 32-bit,
+        # it will fail at runtime with UnsatisfiedLinkError (lmdbjni32...).
+        has_lmdb_win64 = any(fn.startswith("lmdbjni-win64-") and fn.endswith(".jar") for fn in os.listdir(lib_dir))
+        if os.name == "nt" and has_lmdb_win64:
+            try:
+                ver = subprocess.run([java_bin, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds)
+                ver_text = (ver.stderr or "") + "\n" + (ver.stdout or "")
+                if "64-Bit" not in ver_text and "64-bit" not in ver_text:
+                    raise RuntimeError(
+                        "Your Java appears to be 32-bit, but SPICE-1.0 on Windows requires 64-bit Java "
+                        "(lmdbjni-win64). Install a 64-bit JDK/JRE and ensure it is on PATH."
+                    )
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"Java not found ('{java_bin}'). Install Java and ensure it's on PATH, or pass --spice-java-bin."
+                ) from e
+
     cmd = [java_bin, "-jar", jar_abs]
     try:
         proc = subprocess.run(
@@ -340,8 +357,8 @@ def spice_score_java(
         # Main class inferred from your stack trace: edu.anu.spice.SpiceScorer
         cmd_candidates = [
             # Classpath mode
-            [java_bin, "-cp", classpath, "edu.anu.spice.SpiceScorer", in_json, "-out", out_json, "-cache", cache_dir_abs, "-silent"],
-            [java_bin, "-cp", classpath, "edu.anu.spice.SpiceScorer", in_json, "-out", out_json, "-cache", cache_dir_abs],
+            [java_bin, f"-Djava.library.path={lib_dir}", "-cp", classpath, "edu.anu.spice.SpiceScorer", in_json, "-out", out_json, "-cache", cache_dir_abs, "-silent"],
+            [java_bin, f"-Djava.library.path={lib_dir}", "-cp", classpath, "edu.anu.spice.SpiceScorer", in_json, "-out", out_json, "-cache", cache_dir_abs],
             # Fallback to -jar mode (if classpath mode isn't compatible with a given jar)
             [java_bin, "-jar", spice_jar_abs, in_json, "-out", out_json, "-cache", cache_dir_abs, "-silent"],
             [java_bin, "-jar", spice_jar_abs, in_json, "-out", out_json, "-cache", cache_dir_abs],
