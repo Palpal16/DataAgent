@@ -4,8 +4,13 @@ import os
 import json
 import numpy as np
 import csv
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from collections import Counter
+import math
+import re
+import subprocess
+import tempfile
+from functools import partial
 
 def text_to_csv(text: str) -> List[List[str]]:
     """Convert text table to CSV rows.
@@ -86,249 +91,374 @@ def compare_csv(csv1_path, csv2_path):
     
     return columns_names_iou, final_rows_iou, data_iou
 
-def judge_analysis(
-    prompt: str,
-    sql_query: str,
-    data: str,
-    analysis: str,
-    judge_model: str = "gpt-oss:20b",
-    ollama_url: str = "http://localhost:11434"
-) -> Tuple[float, Dict]:
-    """Evaluate data analysis quality using LLM-as-a-Judge.
-    
-    Args:
-        prompt: Original user question
-        sql_query: SQL query that was executed
-        data: SQL results (ground truth)
-        analysis: LLM's analysis text to evaluate
-        judge_model: Ollama model name for judging (default: llama3.1:70b)
-        ollama_url: Ollama server URL
-    
-    Returns:
-        float: Overall score (0,1) = average of correctness, completeness, faithfulness and the detailed_evaluation of the judge
-    """
-    from langchain_ollama import ChatOllama
-    
-    JUDGE_PROMPT = """You are an expert evaluator assessing a data analysis response.
-For the evaluation is important you consider the information that was available for the analysis, if the SQL result is wrong or has missing data, this problem shouldn't affect the analysis score.
-
-### CONTEXT
-USER QUESTION: {prompt}
-SQL QUERY: {sql_query}
-SQL RESULTS: 
-{data}
-
-### ANALYSIS TO EVALUATE
-{analysis}
-
-### EVALUATION RUBRIC (Rate 1-5 for each)
-
-**CORRECTNESS (1-5)**
-Does the analysis accurately interpret the SQL results? Are numerical values correct?
-[1=Wrong, 3=Mostly correct, 5=Perfect]
-
-**COMPLETENESS (1-5)**
-Does it fully address all parts of the user's question using available data?
-[1=Incomplete, 3=Main points covered, 5=Comprehensive]
-
-**FAITHFULNESS (1-5)**
-Does it only use information from SQL results? No hallucinated facts?
-[1=Major hallucinations, 3=Minor issues, 5=Fully grounded]
-
-### OUTPUT
-Return ONLY valid JSON:
-{{
-  "correctness": {{"score": <1-5>, "reasoning": "<brief>", "issues": []}},
-  "completeness": {{"score": <1-5>, "reasoning": "<brief>", "missing": []}},
-  "faithfulness": {{"score": <1-5>, "reasoning": "<brief>", "hallucinations": []}}
-}}"""
-
-    try:
-        # Create judge LLM
-        judge_llm = ChatOllama(
-            model=judge_model,
-            temperature=0.2,
-            base_url=ollama_url,
-            max_tokens=1000
-        )
-        
-        # Truncate data if too long
-        truncated_data = data[:2000] if len(data) > 2000 else data
-        
-        # Get judgment
-        formatted_prompt = JUDGE_PROMPT.format(
-            prompt=prompt,
-            sql_query=sql_query,
-            data=truncated_data,
-            analysis=analysis
-        )
-        
-        response = judge_llm.invoke(formatted_prompt)
-        raw_content = response.content if hasattr(response, "content") else str(response)
-        
-        # Parse JSON
-        evaluation = _parse_judge_json(raw_content)
-        
-        # Compute overall score (average of 3 criteria)
-        scores = [
-            evaluation.get("correctness", {}).get("score", 0),
-            evaluation.get("completeness", {}).get("score", 0),
-            evaluation.get("faithfulness", {}).get("score", 0)
-        ]
-        score = sum(scores) / 3.0
-        overall_score = (score - 1) / 4.0
-        
-        evaluation["overall_score"] = overall_score
-        return overall_score, evaluation
-            
-    except Exception as e:
-        print(f"Judge evaluation error: {e}")
-        return (0.0, {"error": str(e)})
-
-
-def _parse_judge_json(raw_text: str) -> Dict:
-    """Parse judge JSON response with robust error handling."""
-    try:
-        # Clean markdown and find JSON
-        content = raw_text.strip().replace("``````", "").strip()
-        if content.lower().startswith("json"):
-            content = content[4:].strip()
-        
-        start = content.find("{")
-        end = content.rfind("}")
-        
-        if start != -1 and end != -1:
-            parsed = json.loads(content[start:end+1])
-            
-            # Ensure all criteria exist
-            for criterion in ["correctness", "completeness", "faithfulness"]:
-                if criterion not in parsed:
-                    parsed[criterion] = {"score": 0, "reasoning": "Missing", "issues": []}
-            
-            return parsed
-    except Exception as e:
-        print(f"JSON parse error: {e}")
-    
-    # Fallback
-    return {
-        "correctness": {"score": 0, "reasoning": "Parse failed", "issues": []},
-        "completeness": {"score": 0, "reasoning": "Parse failed", "missing": []},
-        "faithfulness": {"score": 0, "reasoning": "Parse failed", "hallucinations": []}
-    }
-
-
-def best_of_n(
-    agent, 
-    prompt: str, 
-    expected_csv: str = None, 
-    csv_path: str = None, 
-    n: int = 3, 
-    temperature: float = 0.1,
+def get_evaluation_functions(
+    *,
     lookup_only: bool = False,
-    judge_model: str = "gpt-oss:20b"
-) -> Tuple[Dict, float]:
-    """Run agent n times and return best result based on evaluation score(s).
+    # CSV evaluation options
+    gt_csv_path: Optional[str] = None,
+    py_csv_eval: bool = False,
+    cpp_csv_eval: bool = False,
+    evaluator_exe: Optional[str] = None,
+    eval_keys: Optional[str] = None,
+    # Text evaluation options
+    gt_text_path: Optional[str] = None,
+    bleu_text_eval: bool = False,
+    bleu_impl: str = "simple",
+    spice_text_eval: bool = False,
+    spice_jar: Optional[str] = None,
+    spice_java_bin: str = "java",
+    llm_text_eval: bool = False,
+) -> tuple[Optional[callable], Optional[callable]]:
+    """Get evaluation functions based on command-line arguments.
     
     Args:
-        agent: SalesDataAgent instance
-        prompt: User question
-        expected_csv: Path to ground truth CSV (for lookup evaluation)
-        csv_path: Path to save generated CSV
-        n: Number of attempts
-        temperature: Single float or (min, max) tuple for temperature range
-        lookup_only: If True, only run lookup+CSV eval; if False, run full agent with both evals
-        judge_model: Model name for LLM-as-a-judge evaluation
+        lookup_only: If True, only CSV evaluation is relevant (no text analysis)
+        py_csv_eval: Use Python CSV evaluator
+        cpp_csv_eval: Use C++ CSV evaluator
+        evaluator_exe: Path to C++ evaluator executable
+        eval_keys: Comma-separated key columns for comparison
+        spice_text_eval: Use SPICE for text evaluation
+        bleu_text_eval: Use BLEU for text evaluation
+        llm_text_eval: Use LLM for text evaluation
+        bleu_impl: BLEU implementation ("simple" or "nltk")
+        spice_jar: Path to SPICE jar file
+        spice_java_bin: Java executable for SPICE
     
     Returns:
-        Tuple of (best_result_dict, score_variance)
+        Tuple of (csv_eval_fn, text_eval_fn), either can be None
     """
-    # Temperature scheduling
-    if isinstance(temperature, (list, tuple)) and len(temperature) == 2:
-        temperatures = np.linspace(temperature[0], temperature[1], n)
-    else:
-        temperatures = [temperature] * n
+    csv_eval_fn = None
+    text_eval_fn = None
     
-    original_temp = agent.llm.temperature
-    best_result = None
-    max_score = -1
-    all_scores = []
-    
-    for i, temp in enumerate(temperatures):
-        print(f"\n--- Attempt {i+1}/{n} (temperature={temp:.2f}) ---")
-        agent.llm.temperature = temp
-        
+    # CSV Evaluation
+    if gt_csv_path:
+        if py_csv_eval:
+            csv_eval_fn = partial(compare_csv,csv2_path=gt_csv_path)
+        elif cpp_csv_eval:
+            if evaluator_exe is None:
+                print("Cannot use --cpp_csv_eval because --evaluator-exe is not available") #TODO: make into warning
+            
+            keys = [k.strip() for k in (eval_keys or "").split(",") if k.strip()] or None
+            csv_eval_fn = partial(run_cpp_comparator, evaluator_exe=evaluator_exe, expected_csv=gt_csv_path, keys=keys)
+
+    # Load ground truth if provided
+    if gt_text_path:
         try:
-            # Run agent
-            if lookup_only:
-                ret = agent.run(prompt, only_lookup=True)
-            else:
-                ret = agent.run(prompt, no_vis=True)
-            
-            # Evaluation 1: CSV/Data IoU (if lookup data available)
-            csv_score = None
-            if expected_csv and csv_path and ret.get('data'):
-                try:
-                    result_rows = text_to_csv(ret['data'])
-                    save_csv(result_rows, csv_path)
-                    columns_names_iou, rows_iou, data_iou = compare_csv(expected_csv, csv_path)
-                    print(f"CSV Eval - Columns: {columns_names_iou:.2f} | Rows: {rows_iou:.2f} | Data: {data_iou:.2f}")
-                    csv_score = data_iou
-                except Exception as e:
-                    print(f"CSV evaluation failed: {e}")
-                    csv_score = 0.0
-            
-            # Evaluation 2: LLM-as-a-Judge (if analysis available)
-            judge_score = None
-            if not lookup_only and ret.get('answer'):
-                try:
-                    judge_score, details = judge_analysis(
-                        prompt=ret.get("prompt", prompt),
-                        sql_query=ret.get("sql_query", ""),
-                        data=ret.get("data", ""),
-                        analysis=ret.get("answer", [""])[0],
-                        judge_model=judge_model,
-                        ollama_url=agent.ollama_url
-                    )
-                    print(f"Judge Eval - Score: {judge_score:.2f}")
-                except Exception as e:
-                    print(f"Judge evaluation failed: {e}")
-                    judge_score = 0.0
-            
-            # Compute final score
-            if lookup_only:
-                # Only CSV score matters
-                final_score = csv_score if csv_score is not None else 0.0
-            else:
-                # Multiply both scores (both in 0-1 range)
-                csv_score = csv_score if csv_score is not None else 0.0
-                judge_score = judge_score if judge_score is not None else 0.0
-                final_score = csv_score * judge_score
-                print(f"Combined Score: {csv_score:.2f} × {judge_score:.2f} = {final_score:.2f}")
-            
-            all_scores.append(final_score)
-            
-            # Track best
-            if final_score > max_score:
-                max_score = final_score
-                best_result = {
-                    'result': ret,
-                    'score': final_score,
-                    'csv_score': csv_score,
-                    'judge_score': judge_score,
-                    'temperature': temp
-                }
-                
+            with open(gt_text_path, 'r', encoding='utf-8') as f:
+                gt_text = f.read()
         except Exception as e:
-            print(f"Error in attempt {i+1}: {e}")
-            all_scores.append(0.0)
+            print(f"Failed to read expected analysis file: {str(e)}")
+            gt_text = None
+
+    if gt_text and not lookup_only:
+        if spice_text_eval:
+            try:
+                check_spice_jar_runnable(spice_jar=spice_jar, java_bin=spice_java_bin)
+            except Exception as e:
+                print(json.dumps({"error": f"SPICE precheck failed: {str(e)}"}, indent=2)) #TODO make into warning
+            
+            text_eval_fn = partial(spice_score_java, reference=gt_text, spice_jar=spice_jar, java_bin=spice_java_bin)
+            
+        elif bleu_text_eval:
+            if bleu_impl == "nltk":
+                text_eval_fn = partial(bleu_score_nltk,reference=gt_text, max_n=4, smooth=True)
+            else:  # simple
+                text_eval_fn = partial(bleu_score,reference=gt_text, max_n=4, smooth=True)
+                
+        elif llm_text_eval:
+            def text_eval_llm(generated_text: str, expected_text: str) -> float:
+                """LLM-as-judge text evaluator."""
+                # TODO: Implement LLM-as-judge evaluation
+                print(f"[Text Eval] LLM-as-judge: comparing texts")
+                return 0.0  # Placeholder
+            text_eval_fn = text_eval_llm
     
-    # Restore original temperature
-    agent.llm.temperature = original_temp
-    
-    # Calculate variance
-    if not all_scores or max_score == -1:
-        return {}, 0.0
-    
-    score_variance = max(all_scores) - min(all_scores)
-    
-    return best_result, score_variance
+    return csv_eval_fn, text_eval_fn
+
+def run_cpp_comparator(
+    *,
+    evaluator_exe: str,
+    actual_csv: str,
+    expected_csv: str,
+    keys: Optional[List[str]] = None,
+    case_insensitive: bool = False,
+    stream_debug: bool = False,
+) -> Dict:
+    args = [evaluator_exe, "--actual", actual_csv, "--expected", expected_csv]
+    if keys:
+        args += ["--key", ",".join(keys)]
+    if case_insensitive:
+        args += ["--case-insensitive"]
+
+    # If stream_debug is True, inherit stderr so C++ debug (sent to stderr) prints to terminal.
+    # Keep stdout captured to parse JSON report.
+    if stream_debug:
+        proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=None, text=True)
+    else:
+        proc = subprocess.run(args, capture_output=True, text=True)
+    stdout = proc.stdout.strip()
+    try:
+        report = json.loads(stdout) if stdout else {}
+    except json.JSONDecodeError:
+        report = {"equal": False, "error": "Invalid JSON from comparator", "raw": stdout}
+    report["exit_code"] = proc.returncode
+    if proc.returncode not in (0, 1):
+        # Non-comparison error, include stderr
+        report.setdefault("error", proc.stderr.strip())
+    return report
+
+def _tokenize_for_bleu(text: str) -> List[str]:
+    """Simple, dependency-free tokenization (words + numbers) for BLEU."""
+    return re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", (text or "").lower())
+
+def bleu_score(reference: str, hypothesis: str, *, max_n: int = 4, smooth: bool = True) -> float:
+    """Compute a simple BLEU score (0..1) with optional add-one smoothing.
+
+    Intended for quick evaluation of generated analysis text; not a full SacreBLEU replacement.
+    """
+    ref_tokens = _tokenize_for_bleu(reference)
+    hyp_tokens = _tokenize_for_bleu(hypothesis)
+    if not hyp_tokens or not ref_tokens:
+        return 0.0
+
+    def ngrams(tokens: List[str], n: int) -> List[Tuple[str, ...]]:
+        return [tuple(tokens[i : i + n]) for i in range(0, len(tokens) - n + 1)]
+
+    precisions: List[float] = []
+    for n in range(1, max_n + 1):
+        hyp_ngrams = ngrams(hyp_tokens, n)
+        ref_ngrams = ngrams(ref_tokens, n)
+        if not hyp_ngrams:
+            precisions.append(0.0)
+            continue
+        hyp_counts: Dict[Tuple[str, ...], int] = {}
+        ref_counts: Dict[Tuple[str, ...], int] = {}
+        for g in hyp_ngrams:
+            hyp_counts[g] = hyp_counts.get(g, 0) + 1
+        for g in ref_ngrams:
+            ref_counts[g] = ref_counts.get(g, 0) + 1
+
+        match = 0
+        total = 0
+        for g, c in hyp_counts.items():
+            total += c
+            match += min(c, ref_counts.get(g, 0))
+        precisions.append((match + 1.0) / (total + 1.0) if smooth else (match / total if total else 0.0))
+
+    ref_len = len(ref_tokens)
+    hyp_len = len(hyp_tokens)
+    bp = 1.0 if hyp_len > ref_len else math.exp(1.0 - (ref_len / max(hyp_len, 1)))
+
+    if any(p <= 0.0 for p in precisions):
+        return 0.0
+    log_mean = sum(math.log(p) for p in precisions) / float(max_n)
+    return float(bp * math.exp(log_mean))
+
+def bleu_score_nltk(reference: str, hypothesis: str, *, max_n: int = 4, smooth: bool = True) -> float:
+    """Compute BLEU (0..1) using NLTK's `sentence_bleu`.
+
+    Requires:
+        `pip install nltk`
+    """
+    try:
+        from nltk.translate.bleu_score import sentence_bleu  # type: ignore
+        from nltk.translate.bleu_score import SmoothingFunction  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise ImportError("NLTK is not installed. Install it with `pip install nltk`.") from e
+
+    ref_tokens = _tokenize_for_bleu(reference)
+    hyp_tokens = _tokenize_for_bleu(hypothesis)
+    if not ref_tokens or not hyp_tokens:
+        return 0.0
+
+    n = int(max(1, min(4, max_n)))
+    if n == 1:
+        weights = (1.0, 0.0, 0.0, 0.0)
+    elif n == 2:
+        weights = (0.5, 0.5, 0.0, 0.0)
+    elif n == 3:
+        weights = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0)
+    else:
+        weights = (0.25, 0.25, 0.25, 0.25)
+
+    smoothing = SmoothingFunction().method1 if smooth else None
+    score = sentence_bleu([ref_tokens], hyp_tokens, weights=weights, smoothing_function=smoothing)
+    # NLTK returns a float in [0,1]
+    return float(score)
+
+def check_spice_jar_runnable(
+    *,
+    spice_jar: str,
+    java_bin: str = "java",
+    timeout_seconds: int = 10,
+) -> None:
+    """Fail-fast validation that the SPICE jar path exists and Java can execute it.
+
+    This prevents spending time running the agent only to later fail with
+    "Unable to access jarfile ...".
+    """
+    if not spice_jar:
+        raise ValueError("spice_jar is required")
+
+    jar_abs = os.path.abspath(spice_jar)
+    if not os.path.exists(jar_abs):
+        raise FileNotFoundError(f"SPICE jar not found: {jar_abs}")
+
+    # If this is the common SPICE-1.0 bundle, ensure Stanford CoreNLP jars are present in lib/.
+    jar_dir = os.path.dirname(jar_abs)
+    lib_dir = os.path.join(jar_dir, "lib")
+    if os.path.isdir(lib_dir):
+        has_corenlp_code = any(
+            fn.startswith("stanford-corenlp-") and fn.endswith(".jar") and "models" not in fn
+            for fn in os.listdir(lib_dir)
+        )
+        has_corenlp_models = any(
+            fn.startswith("stanford-corenlp-") and fn.endswith(".jar") and "models" in fn
+            for fn in os.listdir(lib_dir)
+        )
+        if not (has_corenlp_code and has_corenlp_models):
+            raise RuntimeError(
+                "SPICE requires Stanford CoreNLP jars in the SPICE lib/ folder. "
+                f"Missing in: {lib_dir}. "
+                "The SPICE-1.0 bundle includes a script `get_stanford_models.sh` (Linux/macOS); "
+                "on Windows, download CoreNLP 3.6.0 jars and place them into lib/ "
+                "(both the code jar and the models jar)."
+            )
+
+        # On Windows, SPICE uses LMDB JNI. The bundle provides a win64 JNI jar; if Java is 32-bit,
+        # it will fail at runtime with UnsatisfiedLinkError (lmdbjni32...).
+        has_lmdb_win64 = any(fn.startswith("lmdbjni-win64-") and fn.endswith(".jar") for fn in os.listdir(lib_dir))
+        if os.name == "nt" and has_lmdb_win64:
+            try:
+                ver = subprocess.run([java_bin, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds)
+                ver_text = (ver.stderr or "") + "\n" + (ver.stdout or "")
+                if "64-Bit" not in ver_text and "64-bit" not in ver_text:
+                    raise RuntimeError(
+                        "Your Java appears to be 32-bit, but SPICE-1.0 on Windows requires 64-bit Java "
+                        "(lmdbjni-win64). Install a 64-bit JDK/JRE and ensure it is on PATH."
+                    )
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"Java not found ('{java_bin}'). Install Java and ensure it's on PATH, or pass --spice-java-bin."
+                ) from e
+
+    cmd = [java_bin, "-jar", jar_abs]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            cwd=os.path.dirname(jar_abs) or None,
+        )
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"Java not found ('{java_bin}'). Install Java and ensure it's on PATH, or pass --spice-java-bin."
+        ) from e
+    except subprocess.TimeoutExpired:
+        # If it runs longer than timeout, we assume the jar starts (good enough for this check).
+        return
+
+    stderr = (proc.stderr or "").strip()
+    stdout = (proc.stdout or "").strip()
+    combined = (stderr + "\n" + stdout).strip().lower()
+
+    if "unable to access jarfile" in combined:
+        raise RuntimeError(f"Java cannot access the jar: {jar_abs}")
+    if "no main manifest attribute" in combined:
+        raise RuntimeError(f"Jar is not runnable (no main manifest attribute): {jar_abs}")
+
+    # Otherwise: even if return code is non-zero, many jars print usage/help and exit -> OK.
+
+def spice_score_java(
+    reference: str,
+    hypothesis: str,
+    *,
+    spice_jar: str,
+    java_bin: str = "java",
+    timeout_seconds: int = 120,
+) -> float:
+    """Compute SPICE score (0..1) by calling the official Java SPICE jar.
+
+    This uses the common COCO-caption SPICE JSON format:
+      [{"image_id": 0, "test": "<candidate>", "refs": ["<ref1>", "<ref2>", ...]}]
+
+    Args:
+        reference: Ground-truth/reference text.
+        hypothesis: Generated text to evaluate.
+        spice_jar: Path to SPICE jar (e.g., spice-1.0.jar).
+        java_bin: Java executable to use.
+        timeout_seconds: Kill the Java process if it exceeds this time.
+
+    Returns:
+        SPICE F-score in [0,1].
+    """
+    if not spice_jar:
+        raise ValueError("spice_jar is required")
+    if not isinstance(reference, str) or not isinstance(hypothesis, str):
+        raise TypeError("reference and hypothesis must be strings")
+    if not reference.strip() or not hypothesis.strip():
+        return 0.0
+
+    # Use absolute paths to avoid cwd-related issues inside the Java tool
+    spice_jar_abs = os.path.abspath(spice_jar)
+    jar_dir = os.path.dirname(spice_jar_abs)
+
+    payload = [
+        {
+            "image_id": 0,
+            "test": hypothesis,
+            "refs": [reference],
+        }
+    ]
+
+    with tempfile.TemporaryDirectory() as td:
+        in_json = os.path.abspath(os.path.join(td, "spice_in.json"))
+        out_json = os.path.abspath(os.path.join(td, "spice_out.json"))
+        with open(in_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+        # Simple command: java -Xmx8G -jar spice-*.jar input.json
+        cmd = [
+            java_bin,
+            "-Xmx8G",  # Add memory limit like your working command
+            "-jar",
+            spice_jar_abs,
+            in_json,
+            "-out",
+            out_json, 
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=jar_dir,  # Run from jar directory
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"SPICE timed out after {timeout_seconds}s") from e
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            raise RuntimeError(f"SPICE failed: {stderr}") from e
+
+        if not os.path.exists(out_json):
+            raise RuntimeError("SPICE did not produce an output file")
+
+        with open(out_json, "r", encoding="utf-8") as f:
+            out = json.load(f)
+
+        # Expected (COCO-caption): list with one element; element has `scores` -> `All` -> `f`
+        try:
+            item = out[0] if isinstance(out, list) else out
+            scores = item.get("scores") or {}
+            all_scores = scores.get("All") or scores.get("all") or {}
+            f1 = all_scores.get("f") or all_scores.get("f1")
+            return float(f1) if f1 is not None else 0.0
+        except Exception:
+            return 0.0

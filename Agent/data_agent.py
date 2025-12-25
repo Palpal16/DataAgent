@@ -21,6 +21,9 @@ import os
 import difflib
 from functools import partial
 from typing import Dict, List, Optional
+import tempfile
+import numpy as np
+import argparse
 
 import duckdb
 import pandas as pd
@@ -28,6 +31,8 @@ from typing_extensions import NotRequired, TypedDict
 
 from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
+
+from Agent.utils import *
 
 # Optional tracing/instrumentation (Phoenix / OpenInference)
 try:
@@ -548,13 +553,22 @@ class SalesDataAgent:
         graph.add_edge("create_visualization", "decide_tool")
         
         return graph.compile()
+    
+    def draw_graph(self) -> str:
+        """Return an ASCII rendering of the compiled graph if available."""
+        try:
+            from IPython.display import Image, display
+            display(Image(self.graph.get_graph().draw_mermaid_png()))
+        except Exception:
+            # Fallback if mermaid is not available
+            print(self.graph.get_graph().print_ascii())
 
-    def run(
+    def run_core(
         self,
         prompt: str,
         *,
         visualization_goal: Optional[str] = None,
-        only_lookup: bool = False,
+        lookup_only: bool = False,
         no_vis: bool = False
     ) -> Dict:
         """Execute the agent for a single prompt.
@@ -576,106 +590,245 @@ class SalesDataAgent:
         if not self.run_checked:
             print("Model is not running locally, remember to run ollama serve")
             return {**state, "error": "Model is not running locally, remember to run ollama serve"}
-        else:
-            if visualization_goal:
-                state["visualization_goal"] = visualization_goal
-            # Shortcut: run only the lookup tool
-            if only_lookup:
-                print("[Agent] Running only lookup_sales_data")
-                try:
-                    if self.tracing_enabled and self.tracer is not None:
-                        with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
-                            span.set_input(state)  # type: ignore[attr-defined]
-                            result = lookup_sales_data(state, self.llm, self.tracer)
-                            span.set_output(result)  # type: ignore[attr-defined]
-                            if StatusCode is not None:
-                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                            return result
-                    else:
-                        result = lookup_sales_data(state, self.llm)
-                        return result
-                except Exception as _e:
-                    return {**state, "error": f"Lookup failed: {str(_e)}"}
-            if no_vis:
-                print("[Agent] Running agent without visualization")
-                try:
-                    if self.tracing_enabled and self.tracer is not None:
-                        with self.tracer.start_as_current_span("AgentRun_NoVis", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
-                            span.set_input(state)  # type: ignore[attr-defined]
-                            state = lookup_sales_data(state, self.llm, self.tracer)
-                            result = analyzing_data(state, self.llm, self.tracer)
-                            print(f"\nAgent response: {result.get('answer', [None])[0]}")
-                            span.set_output(result)  # type: ignore[attr-defined]
-                            if StatusCode is not None:
-                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                            return result
-                    else:
-                        state = lookup_sales_data(state, self.llm)
-                        result = analyzing_data(state, self.llm, self.tracer)
-                        print(f"\nAgent response: {result.get('answer', [None])[0]}")
-                        return result
-                except Exception as _e:
-                    print(f"Lookup failed: {str(_e)}")
-                    return {**state, "error": f"Lookup failed: {str(_e)}"}
-
-            print("Running the graph...")
-            if self.tracing_enabled and self.tracer is not None:
-                try:
-                    with self.tracer.start_as_current_span("AgentRun", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
-                        print("[LangGraph] Starting LangGraph execution with tracing")
+    
+        if lookup_only:
+            print("[Agent] Running only lookup_sales_data")
+            try:
+                if self.tracing_enabled and self.tracer is not None:
+                    with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
                         span.set_input(state)  # type: ignore[attr-defined]
-                        result = self.graph.invoke(state)
-                        print(f"\nAgent response: {result.get('answer', [])}")
+                        result = lookup_sales_data(state, self.llm, self.tracer)
                         span.set_output(result)  # type: ignore[attr-defined]
                         if StatusCode is not None:
                             span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                        print("[LangGraph] LangGraph execution completed")
                         return result
-                except Exception:
-                    # Fallback to non-traced execution on any tracing error
+                else:
+                    result = lookup_sales_data(state, self.llm)
+                    return result
+            except Exception as _e:
+                return {**state, "error": f"Lookup failed: {str(_e)}"}
+        if no_vis:
+            print("[Agent] Running agent without visualization")
+            try:
+                if self.tracing_enabled and self.tracer is not None:
+                    with self.tracer.start_as_current_span("AgentRun_NoVis", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                        span.set_input(state)  # type: ignore[attr-defined]
+                        state = lookup_sales_data(state, self.llm, self.tracer)
+                        result = analyzing_data(state, self.llm, self.tracer)
+                        print(f"\nAgent response: {result.get('answer', [None])[0]}")
+                        span.set_output(result)  # type: ignore[attr-defined]
+                        if StatusCode is not None:
+                            span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                        return result
+                else:
+                    state = lookup_sales_data(state, self.llm)
+                    result = analyzing_data(state, self.llm, self.tracer)
+                    print(f"\nAgent response: {result.get('answer', [None])[0]}")
+                    return result
+            except Exception as _e:
+                print(f"Lookup failed: {str(_e)}")
+                return {**state, "error": f"Lookup failed: {str(_e)}"}
+        
+        if visualization_goal:
+            state["visualization_goal"] = visualization_goal
+        print("Running the graph...")
+        if self.tracing_enabled and self.tracer is not None:
+            try:
+                with self.tracer.start_as_current_span("AgentRun", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                    print("[LangGraph] Starting LangGraph execution with tracing")
+                    span.set_input(state)  # type: ignore[attr-defined]
                     result = self.graph.invoke(state)
                     print(f"\nAgent response: {result.get('answer', [])}")
+                    span.set_output(result)  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                    print("[LangGraph] LangGraph execution completed")
                     return result
-            else:
-                print("[LangGraph] Starting LangGraph execution")
+            except Exception:
+                # Fallback to non-traced execution on any tracing error
                 result = self.graph.invoke(state)
-                print("[LangGraph] LangGraph execution completed")
+                print(f"\nAgent response: {result.get('answer', [])}")
                 return result
+        else:
+            print("[LangGraph] Starting LangGraph execution")
+            result = self.graph.invoke(state)
+            print("[LangGraph] LangGraph execution completed")
+            return result
 
-    def draw_graph(self) -> str:
-        """Return an ASCII rendering of the compiled graph if available."""
-        try:
-            from IPython.display import Image, display
-            display(Image(self.graph.get_graph().draw_mermaid_png()))
-        except Exception:
-            # Fallback if mermaid is not available
-            print(self.graph.get_graph().print_ascii())
+    def run(
+        self,
+        prompt: str,
+        *,
+        visualization_goal: Optional[str] = None,
+        lookup_only: bool = False,
+        no_vis: bool = False,
+        best_of_n: int = 1,
+        temp: Optional[float] = None,
+        temp_max: Optional[float] = None,
+        csv_eval_fn: Optional[callable] = None,
+        text_eval_fn: Optional[callable] = None,
+        save_dir: Optional[str] = None,
+    ) -> Dict:
+        
+        if best_of_n > 1 and temp is not None and temp_max is not None:
+            temps = np.linspace(temp, temp_max, best_of_n).tolist()
+        else:
+            temps = [temp if temp is not None else self.llm.temperature] * best_of_n
+        
+        if save_dir is None:
+            save_dir = tempfile.mkdtemp(prefix="agent_runs_")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        print(f"[Agent] Running best-of-{best_of_n} with temperatures: {temps}")
+        
+        all_results = []
+        all_scores = []
+        
+        for i in range(best_of_n):
+            original_temp = self.llm.temperature
+            self.llm.temperature = temps[i]
+            
+            try:
+                result = self.run_core(
+                    prompt,
+                    visualization_goal=visualization_goal,
+                    lookup_only=lookup_only,
+                    no_vis=no_vis
+                )
 
+                # Save CSV
+                csv_path = None
+                if result.get("data"):
+                    csv_path = os.path.join(save_dir, f"run_data.csv")
+                    result_rows = text_to_csv(result['data'])
+                    save_csv(result_rows, csv_path)
+                
+                # Extract analysis text
+                analysis_text = result.get("answer", [None])[0] if result.get("answer") else None
+                
+                # Evaluate
+                score = 0.0
+                csv_score = None
+                text_score = None
+                
+                if csv_eval_fn:
+                    csv_score = csv_eval_fn(csv_path, gt_csv_path)
+                    score += csv_score
+                    result["csv_score"] = csv_score
+                
+                if text_eval_fn:
+                    text_score = text_eval_fn(analysis_text, gt_text)
+                    score += text_score
+                    result["text_score"] = text_score
+                
+                result["temperature"]= temps[i]
+
+                all_results.append(result)
+                all_scores.append(score)
+                
+            except Exception as e:
+                print(f"Error: {str(e)}")
+                
+        
+        self.llm.temperature = original_temp
+        if not all_scores:
+            return {}, 0.0
+        
+        best_idx = int(np.argmax(all_scores))
+        best_result = all_results[best_idx]
+        
+        results_path = os.path.join(save_dir, "all_results.json")
+        with open(results_path, 'w') as f:
+            json.dump(all_results, f, indent=2)
+
+        score_variance = (max(all_scores) - min(all_scores))/max(all_scores)
+        return best_result, score_variance
+            
 
 __all__ = ["SalesDataAgent", "State"]
 
-
 if __name__ == "__main__":
-    import argparse
 
     parser = argparse.ArgumentParser(description="Run the Sales Data Agent")
     parser.add_argument("prompt", type=str, help="User prompt/question")
+    parser.add_argument("--gt_text", type=str, default=None, help="Path to a text file containing the ground-truth")
+    parser.add_argument("--gt_csv", type=str, default=None, help="Path to ground-truth CSV file")
+    parser.add_argument("--save-dir", type=str, default=None, help="Directory to save run results")
+
     parser.add_argument("--data", dest="data_path", type=str, default=DEFAULT_DATA_PATH, help="Path to parquet file")
-    parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional viz goal")
-    parser.add_argument("--model", dest="model", type=str, default="llama3.2:3b", help="Ollama model name (e.g., llama3.2:3b)")
-    # Only-lookup & No-vis flags
-    parser.add_argument("--lookup-only", dest="lookup_only", action="store_true", help="Run only the lookup_sales_data tool")
-    parser.add_argument("--lookup-agent", dest="no_vis", action="store_true", help="Run only the lookup_sales_data tool and the model that gives an answers based on the lookup")
+    parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional visualization goal")
+    parser.add_argument("--model", type=str, default="llama3.2:3b", help="Ollama model name")
+       
+    # Agent type options
+    agent_group = parser.add_mutually_exclusive_group()
+    agent_group.add_argument("--lookup_only", action="store_true", help="Only run data lookup")
+    agent_group.add_argument("--no_vis", action="store_true", help="Run lookup then analysis (no visualization)")
+
+    # Best-of-n options
+    parser.add_argument("--best_of_n", type=int, default=1, help="Run agent N times and pick the best result")
+    parser.add_argument("--temp", type=float, default=0.1, help="Temperature used to build the agent and as minimum for best-of-n")
+    parser.add_argument("--temp-max", type=float, default=None, help="Max temperature for best-of-n, if not provided best-of-n runs without modifying the temperature")
+
+    # CSV evaluation options
+    csv_eval_group = parser.add_mutually_exclusive_group()
+    csv_eval_group.add_argument("--py_csv_eval", action="store_true", help="Use Python evaluator for CSV IoU")
+    csv_eval_group.add_argument("--cpp_csv_eval", action="store_true", help="Use C++ evaluator for CSV IoU")
+    parser.add_argument("--evaluator-exe", dest="evaluator_exe", type=str, default=None, help="Path to C++ comparator executable")
+    parser.add_argument("--eval-keys", dest="eval_keys", type=str, default=None, help="Comma-separated key columns for C++ comparator")
+
+    # Text evaluation options
+    text_eval_group = parser.add_mutually_exclusive_group()
+    text_eval_group.add_argument("--spice_text_eval", action="store_true")
+    text_eval_group.add_argument("--bleu_text_eval", action="store_true")
+    text_eval_group.add_argument("--llm_text_eval", action="store_true") 
+    parser.add_argument("--bleu-impl", type=str, default="simple", choices=["simple", "nltk"], help="BLEU implementation to use for analysis evaluation")
+    parser.add_argument("--spice-jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar)")
+    parser.add_argument("--spice-java-bin", type=str, default="java", help="Java executable for SPICE")
+
+    #TODO: give phoenix and codecarbon options
+    
     args = parser.parse_args()
 
-    agent = SalesDataAgent(model=args.model, data_path=args.data_path)
-    output = agent.run(
+    # Create agent
+    agent = SalesDataAgent(model=args.model, temperature=args.temp, data_path=args.data_path)
+
+    # Get evaluation functions based on arguments
+    csv_eval_fn, text_eval_fn = get_evaluation_functions(
+        lookup_only=args.lookup_only,
+        gt_csv_path = args.gt_csv,
+        py_csv_eval=args.py_csv_eval,
+        cpp_csv_eval=args.cpp_csv_eval,
+        evaluator_exe=args.evaluator_exe,
+        eval_keys=args.eval_keys,
+        gt_text_path=args.gt_text,
+        spice_text_eval=args.spice_text_eval,
+        bleu_text_eval=args.bleu_text_eval,
+        llm_text_eval=args.llm_text_eval,
+        bleu_impl=args.bleu_impl,
+        spice_jar=args.spice_jar,
+        spice_java_bin=args.spice_java_bin,
+    )
+
+    # Run agent
+    output, score_variance = agent.run(
         args.prompt,
         visualization_goal=args.visualization_goal,
-        only_lookup=args.lookup_only,
-        no_vis = args.no_vis
+        lookup_only=args.lookup_only,
+        no_vis=args.no_vis,
+        best_of_n=args.best_of_n,
+        temp=args.temp,
+        temp_max=args.temp_max,
+        csv_eval_fn=csv_eval_fn,
+        text_eval_fn=text_eval_fn,
+        save_dir=args.save_dir,
     )
-    # Minimal printout
-    print(json.dumps({k: v for k, v in output.items() if k != "data"}, indent=2))
-
-
+    
+    # Print results
+    print("\n" + "="*60)
+    print("FINAL RESULTS")
+    print("="*60)
+    if args.best_of_n > 1:
+        print(f"Score variance: {score_variance:.4f}")
+    print(f"Answer: {output.get('answer', [])}")
+    if args.save_dir or args.best_of_n > 1:
+        print(f"Results saved to: {args.save_dir or 'temp directory'}")
