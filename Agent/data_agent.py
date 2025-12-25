@@ -32,7 +32,7 @@ from typing_extensions import NotRequired, TypedDict
 from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
 
-from Agent.utils import *
+from utils import *
 
 # Optional tracing/instrumentation (Phoenix / OpenInference)
 try:
@@ -712,12 +712,12 @@ class SalesDataAgent:
                 text_score = None
                 
                 if csv_eval_fn:
-                    csv_score = csv_eval_fn(csv_path, gt_csv_path)
+                    csv_score = csv_eval_fn(csv_path)
                     score += csv_score
                     result["csv_score"] = csv_score
                 
                 if text_eval_fn:
-                    text_score = text_eval_fn(analysis_text, gt_text)
+                    text_score = text_eval_fn(analysis_text)
                     score += text_score
                     result["text_score"] = text_score
                 
@@ -729,7 +729,6 @@ class SalesDataAgent:
             except Exception as e:
                 print(f"Error: {str(e)}")
                 
-        
         self.llm.temperature = original_temp
         if not all_scores:
             return {}, 0.0
@@ -741,7 +740,7 @@ class SalesDataAgent:
         with open(results_path, 'w') as f:
             json.dump(all_results, f, indent=2)
 
-        score_variance = (max(all_scores) - min(all_scores))/max(all_scores)
+        score_variance = (max(all_scores) - min(all_scores))/max(all_scores) if max(all_scores) != 0 else 0.0
         return best_result, score_variance
             
 
@@ -751,9 +750,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run the Sales Data Agent")
     parser.add_argument("prompt", type=str, help="User prompt/question")
-    parser.add_argument("--gt_text", type=str, default=None, help="Path to a text file containing the ground-truth")
     parser.add_argument("--gt_csv", type=str, default=None, help="Path to ground-truth CSV file")
-    parser.add_argument("--save-dir", type=str, default=None, help="Directory to save run results")
+    parser.add_argument("--gt_text", type=str, default=None, help="Path to a text file containing the ground-truth")
+    parser.add_argument("--save_dir", type=str, default=None, help="Directory to save run results")
 
     parser.add_argument("--data", dest="data_path", type=str, default=DEFAULT_DATA_PATH, help="Path to parquet file")
     parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional visualization goal")
@@ -773,17 +772,18 @@ if __name__ == "__main__":
     csv_eval_group = parser.add_mutually_exclusive_group()
     csv_eval_group.add_argument("--py_csv_eval", action="store_true", help="Use Python evaluator for CSV IoU")
     csv_eval_group.add_argument("--cpp_csv_eval", action="store_true", help="Use C++ evaluator for CSV IoU")
-    parser.add_argument("--evaluator-exe", dest="evaluator_exe", type=str, default=None, help="Path to C++ comparator executable")
-    parser.add_argument("--eval-keys", dest="eval_keys", type=str, default=None, help="Comma-separated key columns for C++ comparator")
+    parser.add_argument("--evaluator_exe", type=str, default=None, help="Path to C++ comparator executable")
+    parser.add_argument("--eval_keys", type=str, default=None, help="Comma-separated key columns for C++ comparator")
+    parser.add_argument("--iou_type", type=str, default="rows", choices=["columns", "rows", "table"], help="Type of IoU to use for CSV evaluation, choose between 'columns', 'rows', 'table'")
 
     # Text evaluation options
     text_eval_group = parser.add_mutually_exclusive_group()
     text_eval_group.add_argument("--spice_text_eval", action="store_true")
     text_eval_group.add_argument("--bleu_text_eval", action="store_true")
     text_eval_group.add_argument("--llm_text_eval", action="store_true") 
-    parser.add_argument("--bleu-impl", type=str, default="simple", choices=["simple", "nltk"], help="BLEU implementation to use for analysis evaluation")
-    parser.add_argument("--spice-jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar)")
-    parser.add_argument("--spice-java-bin", type=str, default="java", help="Java executable for SPICE")
+    parser.add_argument("--bleu_nltk", action="store_true", help="Use nltk for BLEU implementation instead of simple BLEU")
+    parser.add_argument("--spice_jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar)")
+    parser.add_argument("--spice_java_bin", type=str, default="java", help="Java executable for SPICE")
 
     #TODO: give phoenix and codecarbon options
     
@@ -801,10 +801,11 @@ if __name__ == "__main__":
         evaluator_exe=args.evaluator_exe,
         eval_keys=args.eval_keys,
         gt_text_path=args.gt_text,
+        iou_type=args.iou_type,
         spice_text_eval=args.spice_text_eval,
         bleu_text_eval=args.bleu_text_eval,
         llm_text_eval=args.llm_text_eval,
-        bleu_impl=args.bleu_impl,
+        bleu_nltk=args.bleu_nltk,
         spice_jar=args.spice_jar,
         spice_java_bin=args.spice_java_bin,
     )
