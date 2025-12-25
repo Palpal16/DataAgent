@@ -31,7 +31,6 @@ def call_agent():
     bleu_impl = (payload.get("bleu_impl") or payload.get("bleu-impl") or "simple")
     analysis_metric = (payload.get("analysis_metric") or payload.get("analysis-metric") or "bleu")
     spice_jar = payload.get("spice_jar") or payload.get("spice-jar")
-    spice_cache_dir = payload.get("spice_cache_dir") or payload.get("spice-cache-dir") or "spice_cache"
     spice_java_bin = payload.get("spice_java_bin") or payload.get("spice-java-bin") or "java"
     # Fail fast for SPICE (avoid running LLM/DuckDB if jar is missing/unrunnable)
     if str(analysis_metric).lower() == "spice":
@@ -71,7 +70,6 @@ def call_agent():
                     str(expected_analysis),
                     str(hyp),
                     spice_jar=str(spice_jar),
-                    cache_dir=str(spice_cache_dir),
                     java_bin=str(spice_java_bin),
                 )
                 result["analysis_evaluation"] = {"metric": "spice", "impl": "java", "spice": spice_val}

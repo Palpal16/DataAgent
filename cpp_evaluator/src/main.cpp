@@ -22,11 +22,13 @@ struct Options {
     std::string actual_path;
     std::string expected_path;
     std::vector<std::string> keys; // join keys for order-insensitive compare
-    double float_abs = 1e-8;
-    double float_rel = 1e-6;
     bool json = true;
     bool case_insensitive = false;
 };
+
+// Numeric comparison tolerances (constants)
+static constexpr double FLOAT_ABS_TOLERANCE = 1e-8;
+static constexpr double FLOAT_REL_TOLERANCE = 1e-6;
 
 // Trim leading/trailing whitespace
 static inline std::string trim(const std::string &s) {
@@ -66,10 +68,10 @@ static inline bool equals_numeric_or_string(const std::string &a, const std::str
     bool nb = parse_double(b, db);
     if (na && nb) {
         double diff = std::fabs(da - db);
-        if (diff <= opt.float_abs) return true;
+        if (diff <= FLOAT_ABS_TOLERANCE) return true;
         double denom = std::max(std::fabs(da), std::fabs(db));
         if (denom == 0.0) return diff == 0.0;
-        return (diff / denom) <= opt.float_rel;
+        return (diff / denom) <= FLOAT_REL_TOLERANCE;
     }
     // String compare
     if (opt.case_insensitive) {
@@ -439,7 +441,7 @@ static void print_json(const DiffSummary &s) {
 
 // Print CLI usage to stderr
 static void print_usage() {
-    std::cerr << "Usage: resultcmp --actual A.csv --expected E.csv [--key k1,k2] [--float-abs 1e-8] [--float-rel 1e-6] [--case-insensitive]\n";
+    std::cerr << "Usage: resultcmp --actual A.csv --expected E.csv [--key k1,k2] [--case-insensitive]\n";
 }
 
 // CLI entrypoint:
@@ -460,8 +462,6 @@ int main(int argc, char **argv) {
             std::string item;
             while (std::getline(ss, item, ',')) opt.keys.push_back(item);
         }
-        else if (arg == "--float-abs") opt.float_abs = std::stod(next());
-        else if (arg == "--float-rel") opt.float_rel = std::stod(next());
         else if (arg == "--case-insensitive") opt.case_insensitive = true;
         else if (arg == "--help" || arg == "-h") { print_usage(); return 0; }
         else { std::cerr << "Unknown arg: " << arg << "\n"; print_usage(); return 2; }

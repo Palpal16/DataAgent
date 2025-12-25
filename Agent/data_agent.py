@@ -990,7 +990,6 @@ if __name__ == "__main__":
     parser.add_argument("--bleu-impl", dest="bleu_impl", type=str, default="simple", choices=["simple", "nltk"], help="BLEU implementation to use for analysis evaluation")
     parser.add_argument("--analysis-metric", dest="analysis_metric", type=str, default="bleu", choices=["bleu", "spice"], help="Metric to evaluate analysis text")
     parser.add_argument("--spice-jar", dest="spice_jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar) to compute SPICE")
-    parser.add_argument("--spice-cache-dir", dest="spice_cache_dir", type=str, default="spice_cache", help="Cache directory for SPICE")
     parser.add_argument("--spice-java-bin", dest="spice_java_bin", type=str, default="java", help="Java executable for SPICE (default: java)")
     parser.add_argument("--expected-csv", dest="expected_csv", type=str, default=None, help="Path to ground-truth/expected CSV to compare against")
     parser.add_argument("--evaluator-exe", dest="evaluator_exe", type=str, default=None, help="Path to C++ comparator executable (optional)")
@@ -1037,7 +1036,6 @@ if __name__ == "__main__":
                     expected_analysis_text,
                     hyp,
                     spice_jar=args.spice_jar,
-                    cache_dir=args.spice_cache_dir,
                     java_bin=args.spice_java_bin,
                 )
                 output["analysis_evaluation"] = {

@@ -89,6 +89,40 @@ def compare_csv(csv1_path, csv2_path):
     
     return columns_names_iou, final_rows_iou, data_iou
 
+
+def run_cpp_comparator(
+    *,
+    evaluator_exe: str,
+    actual_csv: str,
+    expected_csv: str,
+    keys: Optional[List[str]] = None,
+    case_insensitive: bool = False,
+    stream_debug: bool = False,
+) -> Dict:
+    args = [evaluator_exe, "--actual", actual_csv, "--expected", expected_csv]
+    if keys:
+        args += ["--key", ",".join(keys)]
+    if case_insensitive:
+        args += ["--case-insensitive"]
+
+    # If stream_debug is True, inherit stderr so C++ debug (sent to stderr) prints to terminal.
+    # Keep stdout captured to parse JSON report.
+    if stream_debug:
+        proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=None, text=True)
+    else:
+        proc = subprocess.run(args, capture_output=True, text=True)
+    stdout = proc.stdout.strip()
+    try:
+        report = json.loads(stdout) if stdout else {}
+    except json.JSONDecodeError:
+        report = {"equal": False, "error": "Invalid JSON from comparator", "raw": stdout}
+    report["exit_code"] = proc.returncode
+    if proc.returncode not in (0, 1):
+        # Non-comparison error, include stderr
+        report.setdefault("error", proc.stderr.strip())
+    return report
+
+
 def best_of_n(agent, prompt: str, expected_csv: str=None, csv_path: str=None, n: int=3, temperature: float=0.1) -> Dict:
     if isinstance(temperature, (list, tuple)) and len(temperature) == 2:
         temperatures = np.linspace(temperature[0], temperature[1], n)
@@ -297,7 +331,6 @@ def spice_score_java(
     hypothesis: str,
     *,
     spice_jar: str,
-    cache_dir: str = "spice_cache",
     java_bin: str = "java",
     timeout_seconds: int = 120,
 ) -> float:
@@ -310,7 +343,6 @@ def spice_score_java(
         reference: Ground-truth/reference text.
         hypothesis: Generated text to evaluate.
         spice_jar: Path to SPICE jar (e.g., spice-1.0.jar).
-        cache_dir: Directory for SPICE cache (created if missing).
         java_bin: Java executable to use.
         timeout_seconds: Kill the Java process if it exceeds this time.
 
@@ -326,9 +358,7 @@ def spice_score_java(
 
     # Use absolute paths to avoid cwd-related issues inside the Java tool
     spice_jar_abs = os.path.abspath(spice_jar)
-    cache_dir_abs = os.path.abspath(cache_dir)
-    os.makedirs(cache_dir_abs, exist_ok=True)
-    jar_cwd = os.path.dirname(spice_jar_abs) or None
+    jar_dir = os.path.dirname(spice_jar_abs)
 
     payload = [
         {
@@ -344,55 +374,32 @@ def spice_score_java(
         with open(in_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
 
-        # The SPICE-1.0 bundle ships dependencies in ./lib (but CoreNLP must be added).
-        # Many jars do not include their lib/* on the manifest classpath, so `-jar` can fail.
-        # Prefer running via explicit classpath when lib/ exists.
-        lib_dir = os.path.join(jar_cwd or os.path.dirname(spice_jar_abs), "lib")
-        cp_sep = os.pathsep  # ';' on Windows, ':' on POSIX
-        classpath = spice_jar_abs
-        if os.path.isdir(lib_dir):
-            classpath = classpath + cp_sep + os.path.join(lib_dir, "*")
-
-        # Use the official CLI arguments, but invoke the main class explicitly when using -cp.
-        # Main class inferred from your stack trace: edu.anu.spice.SpiceScorer
-        cmd_candidates = [
-            # Classpath mode
-            [java_bin, f"-Djava.library.path={lib_dir}", "-cp", classpath, "edu.anu.spice.SpiceScorer", in_json, "-out", out_json, "-cache", cache_dir_abs, "-silent"],
-            [java_bin, f"-Djava.library.path={lib_dir}", "-cp", classpath, "edu.anu.spice.SpiceScorer", in_json, "-out", out_json, "-cache", cache_dir_abs],
-            # Fallback to -jar mode (if classpath mode isn't compatible with a given jar)
-            [java_bin, "-jar", spice_jar_abs, in_json, "-out", out_json, "-cache", cache_dir_abs, "-silent"],
-            [java_bin, "-jar", spice_jar_abs, in_json, "-out", out_json, "-cache", cache_dir_abs],
+        # Simple command: java -Xmx8G -jar spice-*.jar input.json
+        cmd = [
+            java_bin,
+            "-Xmx8G",  # Add memory limit like your working command
+            "-jar",
+            spice_jar_abs,
+            in_json,
+            "-out",
+            out_json, 
         ]
 
-        last_err: str = ""
-        last_cmd: Optional[List[str]] = None
-        ran = False
-        for cmd in cmd_candidates:
-            try:
-                ran = True
-                last_cmd = cmd
-                subprocess.run(
-                    cmd,
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=timeout_seconds,
-                    cwd=jar_cwd,
-                )
-                last_err = ""
-                break
-            except subprocess.TimeoutExpired as e:
-                raise RuntimeError(f"SPICE timed out after {timeout_seconds}s") from e
-            except subprocess.CalledProcessError as e:
-                # Keep stderr and try next pattern
-                last_err = (e.stderr or "").strip() or (e.stdout or "").strip()
-                continue
-
-        if last_err:
-            raise RuntimeError(f"SPICE failed. stderr: {last_err}. Last cmd tried: {last_cmd}")
-        if not ran:
-            raise RuntimeError("SPICE failed: no command variants attempted")
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=jar_dir,  # Run from jar directory
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"SPICE timed out after {timeout_seconds}s") from e
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            raise RuntimeError(f"SPICE failed: {stderr}") from e
 
         if not os.path.exists(out_json):
             raise RuntimeError("SPICE did not produce an output file")
@@ -405,10 +412,7 @@ def spice_score_java(
             item = out[0] if isinstance(out, list) else out
             scores = item.get("scores") or {}
             all_scores = scores.get("All") or scores.get("all") or {}
-            f1 = all_scores.get("f")
-            if f1 is None:
-                # Some versions may store as scores["All"]["f1"]
-                f1 = all_scores.get("f1")
+            f1 = all_scores.get("f") or all_scores.get("f1")
             return float(f1) if f1 is not None else 0.0
         except Exception:
             return 0.0

@@ -15,8 +15,11 @@ cpp_evaluator/build/
 apache-jmeter-5.6.3/
 spice_cache/
 SPICE-1.0/
+spice
 
 loop.py
 CMakePresets.json
 
 ninja
+
+test_data_agent.ipynb

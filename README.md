@@ -371,8 +371,7 @@ python -m Agent.data_agent "What were the sum of sales in November 2021?" `
   --analyze-only `
   --expected-analysis-file "results/expected_analysis.txt" `
   --analysis-metric spice `
-  --spice-jar "spice/spice-1.0.jar" `
-  --spice-cache-dir "spice_cache"
+  --spice-jar "spice/spice-1.0.jar"
 ```
 
 ### API example (SPICE)
@@ -383,7 +382,6 @@ python -m Agent.data_agent "What were the sum of sales in November 2021?" `
   "expected_analysis": "…ground truth…",
   "analysis_metric": "spice",
   "spice_jar": "spice/spice-1.0.jar",
-  "spice_cache_dir": "spice_cache",
   "spice_java_bin": "java"
 }
 ```

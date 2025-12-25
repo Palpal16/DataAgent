@@ -35,4 +35,3 @@ python -m Agent.data_agent "What were the sum of sales in November 2021?" `
   --expected-analysis-file "results/expected_analysis.txt" `
   --analysis-metric spice `
   --spice-jar "./SPICE-1.0/spice-1.0.jar" `
-  --spice-cache-dir "spice_cache"
