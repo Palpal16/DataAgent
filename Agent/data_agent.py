@@ -32,7 +32,20 @@ from typing_extensions import NotRequired, TypedDict
 from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
 
-from utils import *
+try:
+    from Agent.utils import *
+except ImportError:
+    from utils import *
+
+# Optional energy/emissions tracking via CodeCarbon
+try:
+    from codecarbon import EmissionsTracker  # type: ignore
+    print("CodeCarbon is available")
+    _CODECARBON_AVAILABLE = True
+except Exception:
+    print("CodeCarbon is not available, not using it")
+    EmissionsTracker = None  # type: ignore
+    _CODECARBON_AVAILABLE = False
 
 # Optional tracing/instrumentation (Phoenix / OpenInference)
 try:
@@ -654,11 +667,11 @@ class SalesDataAgent:
             result = self.graph.invoke(state)
             print("[LangGraph] LangGraph execution completed")
             return result
-
-    def run(
+    
+    def _run_with_evaluation(
         self,
-        prompt: str,
         *,
+        prompt: str,
         visualization_goal: Optional[str] = None,
         lookup_only: bool = False,
         no_vis: bool = False,
@@ -669,15 +682,12 @@ class SalesDataAgent:
         text_eval_fn: Optional[callable] = None,
         save_dir: Optional[str] = None,
     ) -> Dict:
+        """Core evaluation logic extracted from run() for CodeCarbon wrapping."""
         
         if best_of_n > 1 and temp is not None and temp_max is not None:
             temps = np.linspace(temp, temp_max, best_of_n).tolist()
         else:
             temps = [temp if temp is not None else self.llm.temperature] * best_of_n
-        
-        if save_dir is None:
-            save_dir = tempfile.mkdtemp(prefix="agent_runs_")
-        os.makedirs(save_dir, exist_ok=True)
         
         print(f"[Agent] Running best-of-{best_of_n} with temperatures: {temps}")
         
@@ -738,11 +748,71 @@ class SalesDataAgent:
         
         results_path = os.path.join(save_dir, "all_results.json")
         with open(results_path, 'w') as f:
-            json.dump(all_results, f, indent=2)
+            json.dump(all_results, f, indent=2, default=str)
 
         score_variance = (max(all_scores) - min(all_scores))/max(all_scores) if max(all_scores) != 0 else 0.0
         return best_result, score_variance
             
+    def run(
+        self,
+        prompt: str,
+        *,
+        visualization_goal: Optional[str] = None,
+        lookup_only: bool = False,
+        no_vis: bool = False,
+        best_of_n: int = 1,
+        temp: Optional[float] = None,
+        temp_max: Optional[float] = None,
+        csv_eval_fn: Optional[callable] = None,
+        text_eval_fn: Optional[callable] = None,
+        save_dir: Optional[str] = None,
+        enable_codecarbon: bool = False,
+    ) -> Dict:
+        
+        if save_dir is None:
+            save_dir = tempfile.mkdtemp(prefix="agent_runs_")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Wrap execution with CodeCarbon if requested and available
+        if enable_codecarbon and _CODECARBON_AVAILABLE:
+            codecarbon_dir = os.path.join(save_dir, "codecarbon")
+            os.makedirs(codecarbon_dir, exist_ok=True)
+            try:
+                with EmissionsTracker(  # type: ignore[call-arg]
+                    project_name="SalesDataAgent",
+                    output_dir=codecarbon_dir,
+                    save_to_file=True,
+                    measure_power_secs=1,
+                    log_level="error",
+                ):
+                    return self._run_with_evaluation(
+                        prompt=prompt,
+                        visualization_goal=visualization_goal,
+                        lookup_only=lookup_only,
+                        no_vis=no_vis,
+                        best_of_n=best_of_n,
+                        temp=temp,
+                        temp_max=temp_max,
+                        csv_eval_fn=csv_eval_fn,
+                        text_eval_fn=text_eval_fn,
+                        save_dir=save_dir,
+                    )
+            except Exception as e:
+                print(f"CodeCarbon tracking failed: {e}, continuing without it")
+                # Fall through to run without CodeCarbon
+        
+        return self._run_with_evaluation(
+            prompt=prompt,
+            visualization_goal=visualization_goal,
+            lookup_only=lookup_only,
+            no_vis=no_vis,
+            best_of_n=best_of_n,
+            temp=temp,
+            temp_max=temp_max,
+            csv_eval_fn=csv_eval_fn,
+            text_eval_fn=text_eval_fn,
+            save_dir=save_dir,
+        )
 
 __all__ = ["SalesDataAgent", "State"]
 
@@ -785,12 +855,25 @@ if __name__ == "__main__":
     parser.add_argument("--spice_jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar)")
     parser.add_argument("--spice_java_bin", type=str, default="java", help="Java executable for SPICE")
 
-    #TODO: give phoenix and codecarbon options
+    # Phoenix tracking options
+    parser.add_argument("--enable_tracing", action="store_true", help="Enable Phoenix tracing/tracking")
+    parser.add_argument("--phoenix_endpoint", type=str, default="http://localhost:6006/v1/traces", help="Phoenix endpoint URL (default: https://app.phoenix.arize.com/v1/traces)")
+    parser.add_argument("--project_name", type=str, default="evaluating-agent", help="Phoenix project name")
+
+    # CodeCarbon options
+    parser.add_argument("--enable_codecarbon", action="store_true", help="Enable CodeCarbon energy/emissions tracking")
     
     args = parser.parse_args()
 
     # Create agent
-    agent = SalesDataAgent(model=args.model, temperature=args.temp, data_path=args.data_path)
+    agent = SalesDataAgent(
+        model=args.model, 
+        temperature=args.temp, 
+        data_path=args.data_path,
+        enable_tracing=args.enable_tracing,
+        phoenix_endpoint=args.phoenix_endpoint,
+        project_name=args.project_name,
+    )
 
     # Get evaluation functions based on arguments
     csv_eval_fn, text_eval_fn = get_evaluation_functions(
@@ -822,6 +905,7 @@ if __name__ == "__main__":
         csv_eval_fn=csv_eval_fn,
         text_eval_fn=text_eval_fn,
         save_dir=args.save_dir,
+        enable_codecarbon=args.enable_codecarbon,
     )
     
     # Print results
