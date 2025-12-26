@@ -45,6 +45,18 @@ queries = {
         "Which 25 product class codes had the most promotional sales in 2023?"
     ],
     'gpt' : [
+        "Return the 12 months of 2023 with total revenue and total units sold; columns: month_start, total_revenue, total_units; order by month_start ASC.",
+        "Return the top 20 SKUs by total units sold across the full dataset; tie-break by higher total revenue, then SKU_Coded ASC; columns: SKU_Coded, total_units, total_revenue.",
+        "For 2022, return the top 15 Product_Class_Code by total revenue; tie-break by higher total units, then Product_Class_Code ASC; columns: Product_Class_Code, total_revenue, total_units.",
+        "For 2023, return the top 25 stores by promotional unit share (promo_units/total_units) among stores with at least 100 total units; tie-break by Store_Number ASC; columns: Store_Number, promo_unit_share, promo_units, total_units.",
+        "For Q1 2023 (2023-01-01 to 2023-03-31), return the top 30 stores by total revenue; tie-break by Store_Number ASC; columns: Store_Number, total_revenue, total_units.",
+        "For 2023, return the top 10 SKUs by total revenue with avg unit price = sum(Total_Sale_Value)/sum(Qty_Sold); tie-break by SKU_Coded ASC; columns: SKU_Coded, total_revenue, total_units, avg_unit_price.",
+        "For 2023, return month-by-promo aggregates with columns: month_start, On_Promo, total_revenue, total_units; order by month_start ASC, On_Promo ASC; expect 24 rows.",
+        "For 2023, return the top 50 stores by distinct SKUs sold; tie-break by Store_Number ASC; columns: Store_Number, distinct_skus.",
+        "For 2023, return the top 30 Product_Class_Code by promotional units sold (On_Promo=1); tie-break by Product_Class_Code ASC; columns: Product_Class_Code, promo_units.",
+        "Across the full dataset, return the 40 SKUs with the highest average unit price among SKUs with at least 50 units sold; avg_unit_price = sum(Total_Sale_Value)/sum(Qty_Sold); tie-break by SKU_Coded ASC; columns: SKU_Coded, avg_unit_price, total_units, total_revenue.",
+        "Return the 30 most recent Sold_Date values aggregated by date with columns: Sold_Date, total_revenue, total_units; order by Sold_Date DESC.",
+        "For 2022, return the top 25 stores by total units sold for Product_Class_Code = 22975; tie-break by Store_Number ASC; columns: Store_Number, total_units, total_revenue.",
         "Return the 12 months of 2023 with total revenue and total units sold; order by month_start ASC.",
         "Return the top 20 SKUs by total units sold across the full dataset; tie-break by higher total revenue, then SKU_Coded ASC.",
         "For 2022, return the top 15 Product_Class_Code by total revenue; tie-break by higher total units, then Product_Class_Code ASC.",

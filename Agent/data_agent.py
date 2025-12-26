@@ -20,16 +20,22 @@ import json
 import os
 import difflib
 from functools import partial
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
+import tempfile
+import numpy as np
+import argparse
 
 import duckdb
 import pandas as pd
 from typing_extensions import NotRequired, TypedDict
-# Support both `python -m Agent.data_agent ...` and running this file directly.
+
+from langgraph.graph import END, StateGraph
+from langchain_ollama import ChatOllama
+
 try:
-    from .utils import text_to_csv, save_csv, compare_csv, bleu_score, bleu_score_nltk, spice_score_java, check_spice_jar_runnable  # type: ignore
-except Exception:  # pragma: no cover
-    from Agent.utils import text_to_csv, save_csv, compare_csv, bleu_score, bleu_score_nltk, spice_score_java, check_spice_jar_runnable  # type: ignore
+    from Agent.utils import text_to_csv, save_csv, get_evaluation_functions
+except ImportError:
+    from utils import text_to_csv, save_csv, get_evaluation_functions
 
 # Optional energy/emissions tracking via CodeCarbon
 try:
@@ -37,14 +43,9 @@ try:
     print("CodeCarbon is available")
     _CODECARBON_AVAILABLE = True
 except Exception:
-    print("CodeCarbon is not available not using it")
+    print("CodeCarbon is not available, not using it")
     EmissionsTracker = None  # type: ignore
     _CODECARBON_AVAILABLE = False
-
-from langgraph.graph import END, StateGraph
-from langchain_ollama import ChatOllama
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
 
 # Optional tracing/instrumentation (Phoenix / OpenInference)
 try:
@@ -73,49 +74,6 @@ DEFAULT_DATA_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data", "Store_Sales_Price_Elasticity_Promotions_Data.parquet"
 )
 
-def _build_llm(
-    *,
-    model: str,
-    temperature: float,
-    max_tokens: int,
-    streaming: bool,
-    ollama_url: str,
-) :
-    """Create an LLM client from a model string.
-
-    Supported:
-    - Ollama (default): model like "llama3.2:3b"
-    - OpenAI: model like "openai:gpt-4o-mini" or "gpt-4o-mini"
-    - Anthropic: model like "anthropic:claude-3-5-sonnet-latest" or "claude-3-5-sonnet-latest"
-    """
-    m = (model or "").strip()
-    m_lower = m.lower()
-
-    # Prefix-based selection
-    if m_lower.startswith("openai:"):
-        openai_model = m.split(":", 1)[1].strip()
-        return ChatOpenAI(model=openai_model, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
-
-    if m_lower.startswith("anthropic:") or m_lower.startswith("claude:"):
-        anthropic_model = m.split(":", 1)[1].strip()
-        return ChatAnthropic(model=anthropic_model, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
-
-    # Heuristic selection if no prefix provided
-    if m_lower.startswith("gpt-") or m_lower.startswith("o1-") or m_lower.startswith("o3-") or m_lower.startswith("chatgpt"):
-        return ChatOpenAI(model=m, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
-
-    if m_lower.startswith("claude-"):
-        return ChatAnthropic(model=m, temperature=temperature, max_tokens=max_tokens, streaming=streaming)
-
-    # Default to Ollama
-    return ChatOllama(
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        streaming=streaming,
-        base_url=ollama_url,
-    )
-
 # -----------------------------
 # State Definition
 # -----------------------------
@@ -123,7 +81,6 @@ def _build_llm(
 class State(TypedDict):
     prompt: str
     data: Optional[str]
-    analyze_data: Optional[str]
     answer: List[str]
     visualization_goal: Optional[str]
     chart_config: Optional[dict]
@@ -145,7 +102,7 @@ Return only the SQL query, with no explanations or markdown formatting.
 
 
 
-def generate_sql_query(state: State, columns: List[str], table_name: str, llm) -> str:
+def generate_sql_query(state: State, columns: List[str], table_name: str, llm: ChatOllama) -> str:
     """Generate a parameterized SQL query with the LLM based on the user prompt.
 
     Args:
@@ -170,7 +127,7 @@ def generate_sql_query(state: State, columns: List[str], table_name: str, llm) -
     print("Generated SQL Query:\n", cleaned_sql)
     return cleaned_sql
 
-def _lookup_sales_data_once(state: State, llm, tracer=None, csv_output_path: Optional[str] = None) -> Dict:
+def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
     """Look up sales data from a parquet file using LLM-generated SQL over DuckDB.
 
     This function registers the parquet data as a temporary DuckDB table, asks the
@@ -194,11 +151,6 @@ def _lookup_sales_data_once(state: State, llm, tracer=None, csv_output_path: Opt
     try:
         result_df = duckdb.sql(sql_query).df()
         result_str = result_df.to_string()
-
-        # Save to CSV if output path is provided (prefer DataFrame->CSV for fidelity)
-        if csv_output_path:
-            os.makedirs(os.path.dirname(csv_output_path), exist_ok=True)
-            result_df.to_csv(csv_output_path, index=False)
         if tracer is not None:
             try:
                 with tracer.start_as_current_span("sql_query_exec", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
@@ -208,140 +160,52 @@ def _lookup_sales_data_once(state: State, llm, tracer=None, csv_output_path: Opt
                         span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
             except Exception:
                 pass
-        out = {**state, "data": result_str, "sql_query": sql_query}
-        if csv_output_path:
-            out["output_csv"] = csv_output_path
-        return out
+        return {**state, "data": result_str, "sql_query": sql_query}
     except Exception as e: # If the SQL fails, return empty results
         print(f"Error accessing data: {str(e)}")
         return {**state, "data": "", "sql_query": sql_query, "error": f"Error accessing data: {str(e)}"}
 
-def _score_lookup_result(result_df: Optional[pd.DataFrame], error: Optional[str]) -> Tuple[int, int, int]:
-    """Heuristic score for best-of-n selection.
+DATA_ANALYSIS_PROMPT = """ Your goal is to give a clear answer to this question: {prompt}.
+Use the information available and return only a direct answer to the question.
+The only data available is the data extracted from another agent using this SQL code: {sql_query}
+The output of the SQL you can use to answer is this data: {data}
+"""
 
-    Returns a tuple so Python's tuple comparison can pick the "best":
-    - ok_flag: 1 if no error else 0
-    - row_count: number of rows in result (higher is better)
-    - col_count: number of columns in result (higher is better)
+def analyzing_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
+    """Ask the LLM to analyze the looked-up data in the context of the prompt.
+
+    Args:
+        state: Conversation state; should include 'data' and 'prompt'.
+        llm: ChatOllama instance used for the analysis.
+
+    Returns:
+        Updated state including the analysis appended to 'answer'.
     """
-    ok_flag = 0 if error else 1
-    if result_df is None:
-        return (ok_flag, 0, 0)
     try:
-        rows, cols = int(result_df.shape[0]), int(result_df.shape[1])
-    except Exception:
-        rows, cols = 0, 0
-    return (ok_flag, rows, cols)
-
-def lookup_sales_data(state: State, llm, tracer=None, csv_output_path: Optional[str] = None) -> Dict:
-    """Look up sales data (optionally using best-of-n for SQL generation)."""
-    # Allow passing the CSV output path via either:
-    # - function arg (csv_output_path=...)
-    # - state["output_csv"] (set by CLI/run)
-    if not csv_output_path:
-        try:
-            csv_output_path = state.get("output_csv")  # type: ignore[assignment]
-        except Exception:
-            csv_output_path = None
-
-    # Optional best-of-n self-consistency
-    best_of_n = 1
-    try:
-        best_of_n = int(state.get("best_of_n", 1))  # type: ignore[arg-type]
-    except Exception:
-        best_of_n = 1
-    best_of_n = max(1, best_of_n)
-
-    # Temperature schedule for best-of-n
-    try:
-        t_min = float(state.get("best_of_n_temp_min", getattr(llm, "temperature", 0.1) or 0.1))  # type: ignore[arg-type]
-    except Exception:
-        t_min = getattr(llm, "temperature", 0.1) or 0.1
-    try:
-        t_max = float(state.get("best_of_n_temp_max", t_min))  # type: ignore[arg-type]
-    except Exception:
-        t_max = t_min
-
-    if best_of_n <= 1:
-        return _lookup_sales_data_once(state, llm, tracer, csv_output_path=csv_output_path)
-
-    original_temp = getattr(llm, "temperature", None)
-    temps: List[float]
-    if best_of_n == 1:
-        temps = [t_min]
-    elif abs(t_max - t_min) < 1e-9:
-        temps = [t_min] * best_of_n
-    else:
-        # linear schedule
-        step = (t_max - t_min) / float(best_of_n - 1)
-        temps = [t_min + i * step for i in range(best_of_n)]
-
-    best_score: Tuple[int, int, int] = (-1, -1, -1)
-    best_state: Optional[Dict] = None
-
-    for i, temp in enumerate(temps):
-        try:
-            llm.temperature = float(temp)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
-        attempt_state = _lookup_sales_data_once(state, llm, tracer, csv_output_path=None)
-        err = attempt_state.get("error")
-        sql = attempt_state.get("sql_query")
-
-        # Re-run the SQL to get a DF for scoring (cheap, local DuckDB)
-        result_df: Optional[pd.DataFrame] = None
-        try:
-            if sql:
-                result_df = duckdb.sql(sql).df()
-        except Exception:
-            result_df = None
-
-        score = _score_lookup_result(result_df, err)
-        if score > best_score:
-            best_score = score
-            best_state = attempt_state
-
-        print(f"[best-of-n] attempt {i+1}/{best_of_n} temp={temp:.3f} score={score} error={bool(err)}")
-
-    # Restore temperature
-    try:
-        if original_temp is not None:
-            llm.temperature = original_temp  # type: ignore[attr-defined]
-    except Exception:
-        pass
-
-    final_state = best_state or _lookup_sales_data_once(state, llm, tracer, csv_output_path=None)
-
-    # Save only the best attempt (if requested). Prefer best SQL -> DataFrame -> CSV.
-    if csv_output_path:
-        saved = False
-        try:
-            sql_best = final_state.get("sql_query")
-            if sql_best:
-                df_best = duckdb.sql(sql_best).df()
-                os.makedirs(os.path.dirname(csv_output_path), exist_ok=True)
-                df_best.to_csv(csv_output_path, index=False)
-                saved = True
-        except Exception:
-            saved = False
-
-        if not saved:
-            # Fallback to the older string->rows approach
+        #print("Data to analyze:\n", state.get("data", ""))
+        formatted_prompt = DATA_ANALYSIS_PROMPT.format(
+            data=state.get("data", ""), prompt=state.get("prompt", ""), sql_query=state.get("sql_query","")
+        )
+        analysis_result = llm.invoke(formatted_prompt)
+        analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
+        if tracer is not None:
             try:
-                result_rows = text_to_csv(final_state.get("data", "") or "")
-                save_csv(result_rows, csv_output_path)
-                saved = True
-            except Exception as e:
-                final_state = {**final_state, "error": f"CSV save failed: {str(e)}"}
+                with tracer.start_as_current_span("data_analysis", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                    span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
+                    span.set_output(str(analysis_text))  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return {
+            **state,
+            "answer": state.get("answer", []) + [analysis_text],
+        }
+    except Exception as e:
+        print(f"Error analyzing data: {str(e)}")
+        return {**state, "error": f"Error accessing data: {str(e)}"}
 
-        if saved:
-            final_state = {**final_state, "output_csv": csv_output_path}
-
-    final_state = {**final_state, "best_of_n": best_of_n, "best_of_n_temp_min": t_min, "best_of_n_temp_max": t_max}
-    return final_state
-
-def decide_tool(state: State, llm, tracer=None) -> State:
+def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
     """Select the next tool to run given the current conversation state.
 
     The LLM is prompted with the available tools and minimal state. The raw
@@ -388,7 +252,6 @@ def decide_tool(state: State, llm, tracer=None) -> State:
         current_answer = state.get("answer", [])
         visualization_goal = state.get("visualization_goal")
         chart_config = state.get("chart_config")
-        analyzed_data = state.get("analyze_data")
 
         response = llm.invoke(decision_prompt)
         tool_choice = response.content.strip().lower()
@@ -423,7 +286,6 @@ def decide_tool(state: State, llm, tracer=None) -> State:
             **state,
             "prompt": current_prompt,
             "answer": current_answer,
-            "analyze_data": analyzed_data,
             "visualization_goal": visualization_goal,
             "chart_config": chart_config,
             "tool_choice": matched_tool,
@@ -431,40 +293,7 @@ def decide_tool(state: State, llm, tracer=None) -> State:
     except Exception as e:
         print(f"Error deciding tool: {str(e)}")
         return {**state, "error": f"Error accessing data: {str(e)}"}
-
-
-DATA_ANALYSIS_PROMPT = (
-    "Analyze the following data: {data}\n"
-    "Your job is to answer the following question: {prompt}"
-)
-
-
-def analyze_sales_data(state: State, llm, tracer=None) -> Dict:
-    """Run only the analysis step (expects state['data'] to be present)."""
-    try:
-        formatted_prompt = DATA_ANALYSIS_PROMPT.format(
-            data=state.get("data", ""), prompt=state.get("prompt", "")
-        )
-        analysis_result = llm.invoke(formatted_prompt)
-        analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
-        # Optional tracing
-        if tracer is not None:
-            try:
-                with tracer.start_as_current_span("data_analysis", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
-                    span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
-                    span.set_output(str(analysis_text))  # type: ignore[attr-defined]
-                    if StatusCode is not None:
-                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-        return {
-            **state,
-            "analyze_data": analysis_text,
-            "answer": state.get("answer", []) + [analysis_text],
-        }
-    except Exception as e:
-        return {**state, "error": f"Error analyzing data: {str(e)}"}
-
+    
 
 CHART_CONFIGURATION_PROMPT = (
     "Return a compact JSON object describing a chart configuration to visualize the data.\n"
@@ -512,7 +341,7 @@ def _parse_chart_config(raw_text: str) -> Dict[str, str]:
     }
 
 
-def extract_chart_config(state: State, llm) -> State:
+def extract_chart_config(state: State, llm: ChatOllama) -> State:
     """Infer a compact chart configuration from the looked-up data.
 
     Prompts the LLM to return a minified JSON config and parses it into a
@@ -537,7 +366,7 @@ def extract_chart_config(state: State, llm) -> State:
     raw = response.content if hasattr(response, "content") else str(response)
     chart_config = _parse_chart_config(raw)
     chart_config["data"] = data_text
-    print("Este es el chart config: "+str(chart_config))
+    print("This is the cart_config: "+str(chart_config))
     return {**state, "chart_config": chart_config}
 
 
@@ -552,7 +381,7 @@ CREATE_CHART_PROMPT = (
 )
 
 
-def create_chart(state: State, llm) -> str:
+def create_chart(state: State, llm: ChatOllama) -> str:
     """Ask the LLM to emit matplotlib code for the given chart configuration.
 
     Args:
@@ -569,8 +398,8 @@ def create_chart(state: State, llm) -> str:
     # clean any accidental fences
     return code.replace("```python", "").replace("```", "").strip()
 
-
-def create_visualization(state: State, llm) -> State:
+    
+def create_visualization(state: State, llm: ChatOllama, tracer=None) -> State:
     """Create a visualization by first extracting config and then generating code.
 
     Args:
@@ -583,6 +412,15 @@ def create_visualization(state: State, llm) -> State:
     try:
         with_config = extract_chart_config(state, llm)
         code = create_chart(with_config, llm)
+        if tracer is not None:
+            try:
+                with tracer.start_as_current_span("gen_visualization", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
+                    span.set_input(str(state.get("prompt", "")))  # type: ignore[attr-defined]
+                    span.set_output(str(code))  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         return {
             **with_config,
             "answer": with_config.get("answer", []) + [code],
@@ -642,16 +480,12 @@ class SalesDataAgent:
             ollama_url: Optional override for Ollama base URL; defaults to OLLAMA_HOST or http://localhost:11434.
         """
         self.ollama_url = ollama_url or os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        # LLM provider selection:
-        # - default: Ollama (local)
-        # - OpenAI: pass model like "openai:gpt-4o-mini" (requires OPENAI_API_KEY)
-        # - Anthropic: pass model like "anthropic:claude-3-5-sonnet-latest" (requires ANTHROPIC_API_KEY)
-        self.llm = _build_llm(
+        self.llm = ChatOllama(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             streaming=streaming,
-            ollama_url=self.ollama_url,
+            base_url=self.ollama_url,
         )
         self.data_path = data_path or DEFAULT_DATA_PATH
 
@@ -710,75 +544,10 @@ class SalesDataAgent:
         llm = self.llm
         tracer = self.tracer
 
-        def analyzing_data_node(state: State) -> Dict:
-            """Ask the LLM to analyze the looked-up data in the context of the prompt.
-
-            Args:
-                state: Conversation state; should include 'data' and 'prompt'.
-                llm: ChatOllama instance used for the analysis.
-
-            Returns:
-                Updated state including 'analyze_data' and the analysis appended to 'answer'.
-            """
-            try:
-                print("Data to analyze:\n", state.get("data", ""))
-                formatted_prompt = DATA_ANALYSIS_PROMPT.format(
-                    data=state.get("data", ""), prompt=state.get("prompt", "")
-                )
-                analysis_result = llm.invoke(formatted_prompt)
-                analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
-                if tracer is not None:
-                    try:
-                        with tracer.start_as_current_span("data_analysis", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
-                            span.set_input(state.get("prompt", ""))  # type: ignore[attr-defined]
-                            span.set_output(str(analysis_text))  # type: ignore[attr-defined]
-                            if StatusCode is not None:
-                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-                return {
-                    **state,
-                    "analyze_data": analysis_text,
-                    "answer": state.get("answer", []) + [analysis_text],
-                }
-            except Exception as e:
-                print(f"Error analyzing data: {str(e)}")
-                return {**state, "error": f"Error accessing data: {str(e)}"}
-
-        def create_visualization_node(state: State) -> Dict:
-            """Create a visualization by first extracting config and then generating code.
-
-            Args:
-                state: Conversation state; should include 'data'.
-                llm: ChatOllama instance used for config extraction and code generation.
-
-            Returns:
-                Updated state with 'chart_config' and the generated code appended to 'answer'.
-            """
-            try:
-                with_config = extract_chart_config(state, llm)
-                code = create_chart(with_config, llm)
-                if tracer is not None:
-                    try:
-                        with tracer.start_as_current_span("gen_visualization", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
-                            span.set_input(str(state.get("prompt", "")))  # type: ignore[attr-defined]
-                            span.set_output(str(code))  # type: ignore[attr-defined]
-                            if StatusCode is not None:
-                                span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-                return {
-                    **with_config,
-                    "answer": with_config.get("answer", []) + [code],
-                }
-            except Exception as e:
-                print(f"Error creating visualization: {str(e)}")
-                return {**state, "error": f"Error accessing data: {str(e)}"}
-
         graph.add_node("decide_tool", partial(decide_tool, llm=llm, tracer=tracer))
         graph.add_node("lookup_sales_data", partial(lookup_sales_data, llm=llm, tracer=tracer))
-        graph.add_node("analyzing_data", analyzing_data_node)
-        graph.add_node("create_visualization", create_visualization_node)
+        graph.add_node("analyzing_data", partial(analyzing_data, llm=llm, tracer=tracer))
+        graph.add_node("create_visualization", partial(create_visualization, llm=llm, tracer=tracer))
         graph.set_entry_point("decide_tool")
 
         graph.add_conditional_edges(
@@ -797,104 +566,29 @@ class SalesDataAgent:
         graph.add_edge("create_visualization", "decide_tool")
         
         return graph.compile()
-
-    def _run_core(
-        self,
-        state: Dict,
-        visualization_goal: Optional[str],
-        initial_state: Optional[Dict],
-        only_lookup: bool,
-        output_csv: Optional[str] = None,
-        best_of_n: int = 1,
-        best_of_n_temp_min: Optional[float] = None,
-        best_of_n_temp_max: Optional[float] = None,
-        analyze_only: bool = False,
-    ) -> Dict:
-        """Core execution logic for a single agent run.
-
-        Kept separate from `run` so that wrappers like CodeCarbon or tracing
-        can be applied cleanly around this method.
-        """
-        if visualization_goal:
-            state["visualization_goal"] = visualization_goal
-        if initial_state:
-            state.update(initial_state)
-        if output_csv:
-            state["output_csv"] = output_csv
-        # Best-of-n config (consumed by lookup_sales_data)
+    
+    def draw_graph(self) -> str:
+        """Return an ASCII rendering of the compiled graph if available."""
         try:
-            state["best_of_n"] = int(best_of_n)
+            from IPython.display import Image, display
+            display(Image(self.graph.get_graph().draw_mermaid_png()))
         except Exception:
-            state["best_of_n"] = 1
-        if best_of_n_temp_min is not None:
-            state["best_of_n_temp_min"] = float(best_of_n_temp_min)
-        if best_of_n_temp_max is not None:
-            state["best_of_n_temp_max"] = float(best_of_n_temp_max)
+            # Fallback if mermaid is not available
+            print(self.graph.get_graph().print_ascii())
 
-        # Shortcut: run lookup then analysis only (no tool-routing / no visualization)
-        if analyze_only:
-            looked_up = lookup_sales_data(state, self.llm, self.tracer, csv_output_path=output_csv)
-            return analyze_sales_data(looked_up, self.llm, self.tracer)
-
-        # Shortcut: run only the lookup tool
-        if only_lookup:
-            print("[Agent] Running only lookup_sales_data")
-            try:
-                if self.tracing_enabled and self.tracer is not None:
-                    with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
-                        span.set_input(state)  # type: ignore[attr-defined]
-                        result = lookup_sales_data(state, self.llm, self.tracer, csv_output_path=output_csv)
-                        span.set_output(result)  # type: ignore[attr-defined]
-                        if StatusCode is not None:
-                            span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                        return result
-                else:
-                    result = lookup_sales_data(state, self.llm, csv_output_path=output_csv)
-                    return result
-            except Exception as _e:
-                return {**state, "error": f"Lookup failed: {str(_e)}"}
-
-        print("Running the graph...")
-        if self.tracing_enabled and self.tracer is not None:
-            try:
-                with self.tracer.start_as_current_span("AgentRun", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
-                    print("[LangGraph] Starting LangGraph execution with tracing")
-                    span.set_input(state)  # type: ignore[attr-defined]
-                    result = self.graph.invoke(state)
-                    span.set_output(result)  # type: ignore[attr-defined]
-                    if StatusCode is not None:
-                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
-                    print("[LangGraph] LangGraph execution completed")
-                    return result
-            except Exception:
-                # Fallback to non-traced execution on any tracing error
-                result = self.graph.invoke(state)
-                return result
-        else:
-            print("[LangGraph] Starting LangGraph execution")
-            result = self.graph.invoke(state)
-            print("[LangGraph] LangGraph execution completed")
-            return result
-
-    def run(
+    def run_core(
         self,
         prompt: str,
         *,
         visualization_goal: Optional[str] = None,
-        initial_state: Optional[Dict] = None,
-        only_lookup: bool = False,
-        output_csv: Optional[str] = None,
-        best_of_n: int = 1,
-        best_of_n_temp_min: Optional[float] = None,
-        best_of_n_temp_max: Optional[float] = None,
-        analyze_only: bool = False,
+        lookup_only: bool = False,
+        no_vis: bool = False
     ) -> Dict:
         """Execute the agent for a single prompt.
 
         Args:
             prompt: Natural-language request or question.
             visualization_goal: Optional explicit goal for charts; defaults to the prompt.
-            initial_state: Optional seed state to merge in before execution.
 
         Returns:
             The final state dictionary produced by the compiled graph execution.
@@ -909,179 +603,317 @@ class SalesDataAgent:
         if not self.run_checked:
             print("Model is not running locally, remember to run ollama serve")
             return {**state, "error": "Model is not running locally, remember to run ollama serve"}
+    
+        if lookup_only:
+            print("[Agent] Running only lookup_sales_data")
+            try:
+                if self.tracing_enabled and self.tracer is not None:
+                    with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                        span.set_input(state)  # type: ignore[attr-defined]
+                        result = lookup_sales_data(state, self.llm, self.tracer)
+                        span.set_output(result)  # type: ignore[attr-defined]
+                        if StatusCode is not None:
+                            span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                        return result
+                else:
+                    result = lookup_sales_data(state, self.llm)
+                    return result
+            except Exception as _e:
+                return {**state, "error": f"Lookup failed: {str(_e)}"}
+        if no_vis:
+            print("[Agent] Running agent without visualization")
+            try:
+                if self.tracing_enabled and self.tracer is not None:
+                    with self.tracer.start_as_current_span("AgentRun_NoVis", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                        span.set_input(state)  # type: ignore[attr-defined]
+                        state = lookup_sales_data(state, self.llm, self.tracer)
+                        result = analyzing_data(state, self.llm, self.tracer)
+                        print(f"\nAgent response: {result.get('answer', [None])[0]}")
+                        span.set_output(result)  # type: ignore[attr-defined]
+                        if StatusCode is not None:
+                            span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                        return result
+                else:
+                    state = lookup_sales_data(state, self.llm)
+                    result = analyzing_data(state, self.llm, self.tracer)
+                    print(f"\nAgent response: {result.get('answer', [None])[0]}")
+                    return result
+            except Exception as _e:
+                print(f"Lookup failed: {str(_e)}")
+                return {**state, "error": f"Lookup failed: {str(_e)}"}
+        
+        if visualization_goal:
+            state["visualization_goal"] = visualization_goal
+        print("Running the graph...")
+        if self.tracing_enabled and self.tracer is not None:
+            try:
+                with self.tracer.start_as_current_span("AgentRun", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
+                    print("[LangGraph] Starting LangGraph execution with tracing")
+                    span.set_input(state)  # type: ignore[attr-defined]
+                    result = self.graph.invoke(state)
+                    print(f"\nAgent response: {result.get('answer', [])}")
+                    span.set_output(result)  # type: ignore[attr-defined]
+                    if StatusCode is not None:
+                        span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
+                    print("[LangGraph] LangGraph execution completed")
+                    return result
+            except Exception:
+                # Fallback to non-traced execution on any tracing error
+                result = self.graph.invoke(state)
+                print(f"\nAgent response: {result.get('answer', [])}")
+                return result
         else:
-            # Wrap the execution with CodeCarbon tracker if available
-            if _CODECARBON_AVAILABLE:
-                try:
-                    with EmissionsTracker(  # type: ignore[call-arg]
-                        project_name="SalesDataAgent",
-                        output_dir="codecarbon",
-                        save_to_file=True,
-                        measure_power_secs=1,
-                        log_level="error",
-                    ):
-                        return self._run_core(
-                            state,
-                            visualization_goal,
-                            initial_state,
-                            only_lookup,
-                            output_csv=output_csv,
-                            best_of_n=best_of_n,
-                            best_of_n_temp_min=best_of_n_temp_min,
-                            best_of_n_temp_max=best_of_n_temp_max,
-                            analyze_only=analyze_only,
-                        )
-                except Exception:
-                    # If tracker initialization fails, run without it
-                    return self._run_core(
-                        state,
-                        visualization_goal,
-                        initial_state,
-                        only_lookup,
-                        output_csv=output_csv,
-                        best_of_n=best_of_n,
-                        best_of_n_temp_min=best_of_n_temp_min,
-                        best_of_n_temp_max=best_of_n_temp_max,
-                        analyze_only=analyze_only,
-                    )
-            else:
-                return self._run_core(
-                    state,
-                    visualization_goal,
-                    initial_state,
-                    only_lookup,
-                    output_csv=output_csv,
-                    best_of_n=best_of_n,
-                    best_of_n_temp_min=best_of_n_temp_min,
-                    best_of_n_temp_max=best_of_n_temp_max,
-                    analyze_only=analyze_only,
+            print("[LangGraph] Starting LangGraph execution")
+            result = self.graph.invoke(state)
+            print("[LangGraph] LangGraph execution completed")
+            return result
+    
+    def _run_with_evaluation(
+        self,
+        *,
+        prompt: str,
+        visualization_goal: Optional[str] = None,
+        lookup_only: bool = False,
+        no_vis: bool = False,
+        best_of_n: int = 1,
+        temp: Optional[float] = None,
+        temp_max: Optional[float] = None,
+        csv_eval_fn: Optional[callable] = None,
+        text_eval_fn: Optional[callable] = None,
+        save_dir: Optional[str] = None,
+    ) -> Dict:
+        """Core evaluation logic extracted from run() for CodeCarbon wrapping."""
+        
+        if best_of_n > 1 and temp is not None and temp_max is not None:
+            temps = np.linspace(temp, temp_max, best_of_n).tolist()
+        else:
+            temps = [temp if temp is not None else self.llm.temperature] * best_of_n
+        
+        print(f"[Agent] Running best-of-{best_of_n} with temperatures: {temps}")
+        
+        all_results = []
+        all_scores = []
+        
+        for i in range(best_of_n):
+            original_temp = self.llm.temperature
+            self.llm.temperature = temps[i]
+            
+            try:
+                result = self.run_core(
+                    prompt,
+                    visualization_goal=visualization_goal,
+                    lookup_only=lookup_only,
+                    no_vis=no_vis
                 )
 
-    def draw_graph(self) -> str:
-        """Return an ASCII rendering of the compiled graph if available."""
-        try:
-            from IPython.display import Image, display
-            display(Image(self.graph.get_graph().draw_mermaid_png()))
-        except Exception:
-            # Fallback if mermaid is not available
-            print(self.graph.get_graph().print_ascii())
+                # Save CSV
+                csv_path = None
+                if result.get("data"):
+                    csv_path = os.path.join(save_dir, f"run_data.csv")
+                    result_rows = text_to_csv(result['data'])
+                    save_csv(result_rows, csv_path)
+                
+                # Extract analysis text
+                analysis_text = result.get("answer", [None])[0] if result.get("answer") else None
+                
+                # Evaluate
+                score = 0.0
+                csv_score = None
+                text_score = None
+                
+                if csv_eval_fn:
+                    csv_score = csv_eval_fn(csv_path)
+                    score += csv_score
+                    result["csv_score"] = csv_score
+                
+                if text_eval_fn:
+                    text_score = text_eval_fn(analysis_text)
+                    score += text_score
+                    result["text_score"] = text_score
+                
+                result["temperature"]= temps[i]
 
+                all_results.append(result)
+                all_scores.append(score)
+                
+            except Exception as e:
+                print(f"Error: {str(e)}")
+                
+        self.llm.temperature = original_temp
+        if not all_scores:
+            return {}, 0.0
+        
+        best_idx = int(np.argmax(all_scores))
+        best_result = all_results[best_idx]
+        
+        results_path = os.path.join(save_dir, "all_results.json")
+        with open(results_path, 'w') as f:
+            json.dump(all_results, f, indent=2, default=str)
+
+        score_variance = (max(all_scores) - min(all_scores))/max(all_scores) if max(all_scores) != 0 else 0.0
+        return best_result, score_variance
+            
+    def run(
+        self,
+        prompt: str,
+        *,
+        visualization_goal: Optional[str] = None,
+        lookup_only: bool = False,
+        no_vis: bool = False,
+        best_of_n: int = 1,
+        temp: Optional[float] = None,
+        temp_max: Optional[float] = None,
+        csv_eval_fn: Optional[callable] = None,
+        text_eval_fn: Optional[callable] = None,
+        save_dir: Optional[str] = None,
+        enable_codecarbon: bool = False,
+    ) -> Dict:
+        
+        if save_dir is None:
+            save_dir = tempfile.mkdtemp(prefix="agent_runs_")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Wrap execution with CodeCarbon if requested and available
+        if enable_codecarbon and _CODECARBON_AVAILABLE:
+            codecarbon_dir = os.path.join(save_dir, "codecarbon")
+            os.makedirs(codecarbon_dir, exist_ok=True)
+            try:
+                with EmissionsTracker(  # type: ignore[call-arg]
+                    project_name="SalesDataAgent",
+                    output_dir=codecarbon_dir,
+                    save_to_file=True,
+                    measure_power_secs=1,
+                    log_level="error",
+                ):
+                    return self._run_with_evaluation(
+                        prompt=prompt,
+                        visualization_goal=visualization_goal,
+                        lookup_only=lookup_only,
+                        no_vis=no_vis,
+                        best_of_n=best_of_n,
+                        temp=temp,
+                        temp_max=temp_max,
+                        csv_eval_fn=csv_eval_fn,
+                        text_eval_fn=text_eval_fn,
+                        save_dir=save_dir,
+                    )
+            except Exception as e:
+                print(f"CodeCarbon tracking failed: {e}, continuing without it")
+                # Fall through to run without CodeCarbon
+        
+        return self._run_with_evaluation(
+            prompt=prompt,
+            visualization_goal=visualization_goal,
+            lookup_only=lookup_only,
+            no_vis=no_vis,
+            best_of_n=best_of_n,
+            temp=temp,
+            temp_max=temp_max,
+            csv_eval_fn=csv_eval_fn,
+            text_eval_fn=text_eval_fn,
+            save_dir=save_dir,
+        )
 
 __all__ = ["SalesDataAgent", "State"]
 
-
 if __name__ == "__main__":
-    import argparse
 
     parser = argparse.ArgumentParser(description="Run the Sales Data Agent")
     parser.add_argument("prompt", type=str, help="User prompt/question")
+    parser.add_argument("--gt_csv", type=str, default=None, help="Path to ground-truth CSV file")
+    parser.add_argument("--gt_text", type=str, default=None, help="Path to a text file containing the ground-truth")
+    parser.add_argument("--save_dir", type=str, default=None, help="Directory to save run results")
+
     parser.add_argument("--data", dest="data_path", type=str, default=DEFAULT_DATA_PATH, help="Path to parquet file")
-    parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional viz goal")
-    parser.add_argument("--model", dest="model", type=str, default="llama3.2:3b", help="Ollama model name (e.g., llama3.2:3b)")
-    # Only-lookup flag
-    parser.add_argument("--lookup-only", dest="lookup_only", action="store_true", help="Run only the lookup_sales_data tool")
-    parser.add_argument('--output-csv', dest='output_csv', type=str, help='Path to save the output CSV file')
-    parser.add_argument("--best-of-n", dest="best_of_n", type=int, default=1, help="Run lookup N times (self-consistency) and pick the best SQL result")
-    parser.add_argument("--best-of-n-temp-min", dest="best_of_n_temp_min", type=float, default=None, help="Min temperature for best-of-n schedule")
-    parser.add_argument("--best-of-n-temp-max", dest="best_of_n_temp_max", type=float, default=None, help="Max temperature for best-of-n schedule")
-    parser.add_argument("--analyze-only", dest="analyze_only", action="store_true", help="Run lookup then analysis (no visualization)")
-    parser.add_argument("--expected-analysis", dest="expected_analysis", type=str, default=None, help="Ground-truth analysis text to compute BLEU against")
-    parser.add_argument("--expected-analysis-file", dest="expected_analysis_file", type=str, default=None, help="Path to a text file containing ground-truth analysis (BLEU)")
-    parser.add_argument("--bleu-impl", dest="bleu_impl", type=str, default="simple", choices=["simple", "nltk"], help="BLEU implementation to use for analysis evaluation")
-    parser.add_argument("--analysis-metric", dest="analysis_metric", type=str, default="bleu", choices=["bleu", "spice"], help="Metric to evaluate analysis text")
-    parser.add_argument("--spice-jar", dest="spice_jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar) to compute SPICE")
-    parser.add_argument("--spice-java-bin", dest="spice_java_bin", type=str, default="java", help="Java executable for SPICE (default: java)")
-    parser.add_argument("--expected-csv", dest="expected_csv", type=str, default=None, help="Path to ground-truth/expected CSV to compare against")
-    parser.add_argument("--evaluator-exe", dest="evaluator_exe", type=str, default=None, help="Path to C++ comparator executable (optional)")
-    parser.add_argument("--eval-keys", dest="eval_keys", type=str, default=None, help="Comma-separated key columns for C++ comparator (optional)")
+    parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional visualization goal")
+    parser.add_argument("--model", type=str, default="llama3.2:3b", help="Ollama model name")
+       
+    # Agent type options
+    agent_group = parser.add_mutually_exclusive_group()
+    agent_group.add_argument("--lookup_only", action="store_true", help="Only run data lookup")
+    agent_group.add_argument("--no_vis", action="store_true", help="Run lookup then analysis (no visualization)")
+
+    # Best-of-n options
+    parser.add_argument("--best_of_n", type=int, default=1, help="Run agent N times and pick the best result")
+    parser.add_argument("--temp", type=float, default=0.1, help="Temperature used to build the agent and as minimum for best-of-n")
+    parser.add_argument("--temp-max", type=float, default=None, help="Max temperature for best-of-n, if not provided best-of-n runs without modifying the temperature")
+
+    # CSV evaluation options
+    csv_eval_group = parser.add_mutually_exclusive_group()
+    csv_eval_group.add_argument("--py_csv_eval", action="store_true", help="Use Python evaluator for CSV IoU")
+    csv_eval_group.add_argument("--cpp_csv_eval", action="store_true", help="Use C++ evaluator for CSV IoU")
+    parser.add_argument("--evaluator_exe", type=str, default=None, help="Path to C++ comparator executable")
+    parser.add_argument("--eval_keys", type=str, default=None, help="Comma-separated key columns for C++ comparator")
+    parser.add_argument("--iou_type", type=str, default="rows", choices=["columns", "rows", "table"], help="Type of IoU to use for CSV evaluation, choose between 'columns', 'rows', 'table'")
+
+    # Text evaluation options
+    text_eval_group = parser.add_mutually_exclusive_group()
+    text_eval_group.add_argument("--spice_text_eval", action="store_true")
+    text_eval_group.add_argument("--bleu_text_eval", action="store_true")
+    text_eval_group.add_argument("--llm_text_eval", action="store_true") 
+    parser.add_argument("--bleu_nltk", action="store_true", help="Use nltk for BLEU implementation instead of simple BLEU")
+    parser.add_argument("--spice_jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar)")
+    parser.add_argument("--spice_java_bin", type=str, default="java", help="Java executable for SPICE")
+
+    # Phoenix tracking options
+    parser.add_argument("--enable_tracing", action="store_true", help="Enable Phoenix tracing/tracking")
+    parser.add_argument("--phoenix_endpoint", type=str, default="http://localhost:6006/v1/traces", help="Phoenix endpoint URL (default: https://app.phoenix.arize.com/v1/traces)")
+    parser.add_argument("--project_name", type=str, default="evaluating-agent", help="Phoenix project name")
+
+    # CodeCarbon options
+    parser.add_argument("--enable_codecarbon", action="store_true", help="Enable CodeCarbon energy/emissions tracking")
+    
     args = parser.parse_args()
 
-    # Fail fast if user requested SPICE (avoid running LLM/DuckDB first)
-    if args.analysis_metric == "spice":
-        try:
-            check_spice_jar_runnable(spice_jar=args.spice_jar, java_bin=args.spice_java_bin)
-        except Exception as e:
-            print(json.dumps({"error": f"SPICE precheck failed: {str(e)}"}, indent=2))
-            raise SystemExit(2)
-
-    agent = SalesDataAgent(model=args.model, data_path=args.data_path)
-    output = agent.run(
-        args.prompt,
-        visualization_goal=args.visualization_goal,
-        only_lookup=args.lookup_only,
-        output_csv=args.output_csv,
-        best_of_n=args.best_of_n,
-        best_of_n_temp_min=args.best_of_n_temp_min,
-        best_of_n_temp_max=args.best_of_n_temp_max,
-        analyze_only=args.analyze_only,
+    # Create agent
+    agent = SalesDataAgent(
+        model=args.model, 
+        temperature=args.temp, 
+        data_path=args.data_path,
+        enable_tracing=args.enable_tracing,
+        phoenix_endpoint=args.phoenix_endpoint,
+        project_name=args.project_name,
     )
 
-    # Optional: analysis BLEU evaluation (generated analysis vs expected analysis)
-    expected_analysis_text = args.expected_analysis
-    if not expected_analysis_text and args.expected_analysis_file:
-        try:
-            with open(args.expected_analysis_file, "r", encoding="utf-8") as f:
-                expected_analysis_text = f.read()
-        except Exception as e:
-            output["analysis_evaluation"] = {"error": f"Failed to read expected analysis file: {str(e)}"}
-            expected_analysis_text = None
+    # Get evaluation functions based on arguments
+    csv_eval_fn, text_eval_fn = get_evaluation_functions(
+        lookup_only=args.lookup_only,
+        gt_csv_path = args.gt_csv,
+        py_csv_eval=args.py_csv_eval,
+        cpp_csv_eval=args.cpp_csv_eval,
+        evaluator_exe=args.evaluator_exe,
+        eval_keys=args.eval_keys,
+        gt_text_path=args.gt_text,
+        iou_type=args.iou_type,
+        spice_text_eval=args.spice_text_eval,
+        bleu_text_eval=args.bleu_text_eval,
+        llm_text_eval=args.llm_text_eval,
+        bleu_nltk=args.bleu_nltk,
+        spice_jar=args.spice_jar,
+        spice_java_bin=args.spice_java_bin,
+    )
 
-    if expected_analysis_text is not None:
-        try:
-            hyp = output.get("analyze_data") or ""
-            if args.analysis_metric == "spice":
-                if not args.spice_jar:
-                    raise ValueError("SPICE selected but --spice-jar was not provided")
-                spice_val = spice_score_java(
-                    expected_analysis_text,
-                    hyp,
-                    spice_jar=args.spice_jar,
-                    java_bin=args.spice_java_bin,
-                )
-                output["analysis_evaluation"] = {
-                    "metric": "spice",
-                    "impl": "java",
-                    "spice": spice_val,
-                }
-            else:
-                if args.bleu_impl == "nltk":
-                    bleu_val = bleu_score_nltk(expected_analysis_text, hyp, max_n=4, smooth=True)
-                else:
-                    bleu_val = bleu_score(expected_analysis_text, hyp, max_n=4, smooth=True)
-                output["analysis_evaluation"] = {
-                    "metric": "bleu",
-                    "impl": args.bleu_impl,
-                    "bleu": bleu_val,
-                }
-        except Exception as e:
-            output["analysis_evaluation"] = {"error": f"Analysis evaluation failed: {str(e)}"}
-
-    # Optional: compare actual vs expected CSV (IoU by default, C++ comparator if --evaluator-exe is provided)
-    if args.expected_csv:
-        actual_csv = args.output_csv or output.get("output_csv")
-        try:
-            if args.evaluator_exe:
-                from evaluator import run_cpp_comparator  # type: ignore
-
-                keys = [k.strip() for k in (args.eval_keys or "").split(",") if k.strip()] or None
-                output["evaluation"] = run_cpp_comparator(
-                    evaluator_exe=args.evaluator_exe,
-                    actual_csv=str(actual_csv),
-                    expected_csv=str(args.expected_csv),
-                    keys=keys,
-                )
-            else:
-                c_iou, r_iou, d_iou = compare_csv(str(args.expected_csv), str(actual_csv))
-                output["evaluation"] = {
-                    "mode": "iou",
-                    "columns_iou": c_iou,
-                    "rows_iou": r_iou,
-                    "data_iou": d_iou,
-                }
-        except Exception as e:
-            output["evaluation"] = {"equal": False, "error": f"Evaluation failed: {str(e)}"}
-
-    # Minimal printout
-    print(json.dumps({k: v for k, v in output.items() if k != "data"}, indent=2))
-
-
+    # Run agent
+    output, score_variance = agent.run(
+        args.prompt,
+        visualization_goal=args.visualization_goal,
+        lookup_only=args.lookup_only,
+        no_vis=args.no_vis,
+        best_of_n=args.best_of_n,
+        temp=args.temp,
+        temp_max=args.temp_max,
+        csv_eval_fn=csv_eval_fn,
+        text_eval_fn=text_eval_fn,
+        save_dir=args.save_dir,
+        enable_codecarbon=args.enable_codecarbon,
+    )
+    
+    # Print results
+    print("\n" + "="*60)
+    print("FINAL RESULTS")
+    print("="*60)
+    if args.best_of_n > 1:
+        print(f"Score variance: {score_variance:.4f}")
+    print(f"Answer: {output.get('answer', [])}")
+    if args.save_dir or args.best_of_n > 1:
+        print(f"Results saved to: {args.save_dir or 'temp directory'}")

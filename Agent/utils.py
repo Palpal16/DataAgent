@@ -10,6 +10,7 @@ import math
 import re
 import subprocess
 import tempfile
+from functools import partial
 
 def text_to_csv(text: str) -> List[List[str]]:
     """Convert text table to CSV rows.
@@ -44,6 +45,105 @@ def save_csv(rows: List[List[str]], filepath: str):
         writer = csv.writer(f)
         writer.writerows(rows)
 
+def get_evaluation_functions(
+    *,
+    lookup_only: bool = False,
+    # CSV evaluation options
+    gt_csv_path: Optional[str] = None,
+    py_csv_eval: bool = False,
+    cpp_csv_eval: bool = False,
+    evaluator_exe: Optional[str] = None,
+    eval_keys: Optional[str] = None,
+    iou_type: str = "rows",
+    # Text evaluation options
+    gt_text_path: Optional[str] = None,
+    bleu_text_eval: bool = False,
+    bleu_nltk: bool = False,
+    spice_text_eval: bool = False,
+    spice_jar: Optional[str] = None,
+    spice_java_bin: str = "java",
+    llm_text_eval: bool = False,
+) -> tuple[Optional[callable], Optional[callable]]:
+    """Get evaluation functions based on command-line arguments.
+    
+    Args:
+        lookup_only: If True, only CSV evaluation is relevant (no text analysis)
+        py_csv_eval: Use Python CSV evaluator
+        cpp_csv_eval: Use C++ CSV evaluator
+        evaluator_exe: Path to C++ evaluator executable
+        eval_keys: Comma-separated key columns for comparison
+        spice_text_eval: Use SPICE for text evaluation
+        bleu_text_eval: Use BLEU for text evaluation
+        llm_text_eval: Use LLM for text evaluation
+        bleu_impl: BLEU implementation ("simple" or "nltk")
+        spice_jar: Path to SPICE jar file
+        spice_java_bin: Java executable for SPICE
+    
+    Returns:
+        Tuple of (csv_eval_fn, text_eval_fn), either can be None
+    """
+    csv_eval_fn = None
+    text_eval_fn = None
+    
+    # CSV Evaluation
+    if gt_csv_path:
+        if py_csv_eval:
+            iou_type_map = {"columns": 0, "rows": 1, "table": 2}
+            iou_index = iou_type_map.get(iou_type, 1)  # Default to rows (1)
+            csv_eval_fn = lambda csv_path: compare_csv(csv_path, gt_csv_path)[iou_index]
+        elif cpp_csv_eval:
+            if evaluator_exe is None:
+                print("Cannot use --cpp_csv_eval because --evaluator-exe is not available") #TODO: make into warning
+            
+            keys = [k.strip() for k in (eval_keys or "").split(",") if k.strip()] or None
+            def cpp_wrapper(csv_path):
+                try:
+                    output = run_cpp_comparator(
+                        actual_csv=csv_path, 
+                        evaluator_exe=evaluator_exe, 
+                        expected_csv=gt_csv_path, 
+                        keys=keys
+                    )
+                    iou_type_map = {"columns": "columns_iou", "rows": "rows_iou", "table": "iou"}
+                    return output.get(iou_type_map.get(iou_type,"rows_iou"),0.0)
+                except Exception as e:
+                    print(f"[CSV Eval] C++ comparator failed: {e}")
+                    return 0.0
+            csv_eval_fn = cpp_wrapper
+
+    # Load ground truth if provided
+    if gt_text_path:
+        try:
+            with open(gt_text_path, 'r', encoding='utf-8') as f:
+                gt_text = f.read()
+        except Exception as e:
+            print(f"Failed to read expected analysis file: {str(e)}")
+            gt_text = None
+
+    if gt_text_path and gt_text and not lookup_only:
+        if spice_text_eval:
+            try:
+                check_spice_jar_runnable(spice_jar=spice_jar, java_bin=spice_java_bin)
+            except Exception as e:
+                print(json.dumps({"error": f"SPICE precheck failed: {str(e)}"}, indent=2)) #TODO make into warning
+            
+            text_eval_fn = partial(spice_score_java, reference=gt_text, spice_jar=spice_jar, java_bin=spice_java_bin)
+            
+        elif bleu_text_eval:
+            if bleu_nltk:
+                text_eval_fn = partial(bleu_score_nltk,reference=gt_text, max_n=4, smooth=True)
+            else:  # simple
+                text_eval_fn = partial(bleu_score,reference=gt_text, max_n=4, smooth=True)
+                
+        elif llm_text_eval:
+            def text_eval_llm(generated_text: str, expected_text: str) -> float:
+                """LLM-as-judge text evaluator."""
+                # TODO: Implement LLM-as-judge evaluation
+                print(f"[Text Eval] LLM-as-judge: comparing texts")
+                return 0.0  # Placeholder
+            text_eval_fn = text_eval_llm
+    
+    return csv_eval_fn, text_eval_fn
 
 def compare_csv(csv1_path, csv2_path):
     """
@@ -53,7 +153,8 @@ def compare_csv(csv1_path, csv2_path):
     try:
         df1 = pd.read_csv(csv1_path)
         df2 = pd.read_csv(csv2_path)
-    except:
+    except Exception as e:
+        print(f"Error while loading csvs for evaluation: {e}") 
         return 0. , 0. , 0.
     
     # 1. Column names IoU
@@ -89,7 +190,6 @@ def compare_csv(csv1_path, csv2_path):
     
     return columns_names_iou, final_rows_iou, data_iou
 
-
 def run_cpp_comparator(
     *,
     evaluator_exe: str,
@@ -122,48 +222,11 @@ def run_cpp_comparator(
         report.setdefault("error", proc.stderr.strip())
     return report
 
-
-def best_of_n(agent, prompt: str, expected_csv: str=None, csv_path: str=None, n: int=3, temperature: float=0.1) -> Dict:
-    if isinstance(temperature, (list, tuple)) and len(temperature) == 2:
-        temperatures = np.linspace(temperature[0], temperature[1], n)
-    else:
-        temperatures = [temperature] * n
-    max_score=-1
-    original_temp = agent.llm.temperature
-    for i,temp in enumerate(temperatures):
-        print(f"\n--- Attempt {i+1}/{n} (temperature={temp:.2f}) ---")
-        agent.llm.temperature = temp
-        try:
-            ret = agent.run(prompt, only_lookup=True)
-            result_rows = text_to_csv(ret['data'])
-            save_csv(result_rows, csv_path)
-            columns_names_iou, rows_iou, data_iou = compare_csv(expected_csv, csv_path)
-            print(f"Columns Names IoU: {columns_names_iou:.2f} -- Rows IoU: {rows_iou:.2f} -- Data IoU: {data_iou:.2f}")
-            score = (rows_iou + data_iou)/3
-            print(f"Score: {score:.2f}")
-            if score>max_score:
-                max_score=score
-                best_result = {
-                    'result': ret,
-                    'score': score,
-                    'temperature': temp,
-                    'attempt': i + 1
-                }
-        except Exception as e:
-            print(f"Error in attempt {i+1}: {e}") 
-
-    if max_score == -1:
-        return []
-    agent.llm.temperature = original_temp
-    return best_result
-
-
 def _tokenize_for_bleu(text: str) -> List[str]:
     """Simple, dependency-free tokenization (words + numbers) for BLEU."""
     return re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", (text or "").lower())
 
-
-def bleu_score(reference: str, hypothesis: str, *, max_n: int = 4, smooth: bool = True) -> float:
+def bleu_score(hypothesis: str, reference: str, *, max_n: int = 4, smooth: bool = True) -> float:
     """Compute a simple BLEU score (0..1) with optional add-one smoothing.
 
     Intended for quick evaluation of generated analysis text; not a full SacreBLEU replacement.
@@ -206,8 +269,7 @@ def bleu_score(reference: str, hypothesis: str, *, max_n: int = 4, smooth: bool 
     log_mean = sum(math.log(p) for p in precisions) / float(max_n)
     return float(bp * math.exp(log_mean))
 
-
-def bleu_score_nltk(reference: str, hypothesis: str, *, max_n: int = 4, smooth: bool = True) -> float:
+def bleu_score_nltk(hypothesis: str, reference: str, *, max_n: int = 4, smooth: bool = True) -> float:
     """Compute BLEU (0..1) using NLTK's `sentence_bleu`.
 
     Requires:
@@ -325,10 +387,9 @@ def check_spice_jar_runnable(
 
     # Otherwise: even if return code is non-zero, many jars print usage/help and exit -> OK.
 
-
 def spice_score_java(
-    reference: str,
     hypothesis: str,
+    reference: str,
     *,
     spice_jar: str,
     java_bin: str = "java",

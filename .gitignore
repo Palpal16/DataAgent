@@ -23,3 +23,10 @@ CMakePresets.json
 ninja
 
 test_data_agent.ipynb
+output
+results
+
+jmeter.log
+
+codecarbon
+.cache
