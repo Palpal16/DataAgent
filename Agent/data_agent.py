@@ -33,9 +33,9 @@ from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
 
 try:
-    from Agent.utils import *
+    from Agent.utils import text_to_csv, save_csv, get_evaluation_functions
 except ImportError:
-    from utils import *
+    from utils import text_to_csv, save_csv, get_evaluation_functions
 
 # Optional energy/emissions tracking via CodeCarbon
 try:

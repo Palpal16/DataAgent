@@ -25,3 +25,5 @@ ninja
 test_data_agent.ipynb
 output
 results
+
+jmeter.log
