@@ -2,7 +2,7 @@
 // agent_orchestrator: run Python agent to generate CSV, then compare with resultcmp.
 //
 // Typical usage (from repo root):
-//   cpp_evaluator/build/agent_orchestrator.exe ^
+//   my_cpp/build/agent_orchestrator.exe ^
 //     --prompt "What were the sales in November 2021?" ^
 //     --save-dir "results/" ^
 //     --expected-csv "results/real_sales_november_2021.csv" ^

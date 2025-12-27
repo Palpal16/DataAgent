@@ -195,7 +195,7 @@ python -m Agent.data_agent "What were the sales in November 2021?" --lookup-only
 
 Build the comparator (requires CMake):
 ```powershell
-cd cpp_evaluator
+cd my_cpp
 cmake -S . -B build -G "Ninja"  # or "Visual Studio 17 2022" on Windows
 cmake --build build --config Release
 cd ..
@@ -207,7 +207,7 @@ python -m Agent.data_agent "Weekly sales in 2021" `
   --lookup-only `
   --output-csv "results/weekly_sales_2021.csv" `
   --expected-csv "C:\path\to\expected.csv" `
-  --evaluator-exe ".\cpp_evaluator\build\resultcmp.exe" `
+  --evaluator-exe ".\my_cpp\build\resultcmp.exe" `
   --eval-keys "week,store_id"
 ```
 
@@ -218,7 +218,7 @@ python -m Agent.data_agent "Weekly sales in 2021" `
   --model "llama3.2:3b" `
   --output-csv "results/weekly_sales_2021.csv" `
   --expected-csv "C:\path\to\expected.csv" `
-  --evaluator-exe ".\cpp_evaluator\build\resultcmp.exe" `
+  --evaluator-exe ".\my_cpp\build\resultcmp.exe" `
   --eval-keys "week,store_id"
 ```
 
@@ -352,7 +352,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5000/call-agent" -ContentT
 ```
 
 Use the C++ comparator via the API by adding:
-- `evaluator_exe`: e.g. `".\cpp_evaluator\build\resultcmp.exe"`
+- `evaluator_exe`: e.g. `".\my_cpp\build\resultcmp.exe"`
 - `eval_keys`: e.g. `"week,store_id"`
 
 ---
@@ -437,3 +437,53 @@ Open `http://localhost:8050/`.
 Notes:
 - On Windows, CodeCarbon works without special drivers; it may use modeled power if sensors are unavailable.
 - Logs are estimates; keep the machine plugged in and avoid heavy background tasks for more stable readings.
+
+
+## Building agent_config_runner
+
+### Quick Build
+
+```bash
+# Compile directly
+g++ -std=c++11 -o agent_config_runner agent_config_runner.cpp
+
+# Or with CMake
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make
+```
+
+### Usage
+
+```bash
+# Use default agent_config.yaml in current directory
+./agent_config_runner
+
+# Specify custom config file
+./agent_config_runner path/to/my_config.yaml
+```
+
+### Single Query Mode
+
+Set in agent_config.yaml:
+```yaml
+prompt: "Your question"
+run_batch: false
+```
+
+### Batch Mode
+
+Set in agent_config.yaml:
+```yaml
+test_cases_json: ./test_cases.json
+run_batch: true
+```
+
+### Features
+
+✓ Efficient YAML parsing (no external dependencies)
+✓ Batch processing with progress tracking
+✓ Temporary file handling for gt_data/gt_analysis
+✓ Per-test-case save directories
+✓ Success/failure reporting
+✓ Minimal overhead

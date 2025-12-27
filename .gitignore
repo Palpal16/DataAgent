@@ -7,11 +7,11 @@ evaluation/csv_queries
 
 shared.txt
 out/
-cpp_evaluator/out/
+my_cpp/out/
 build/
 cplusplus/
 
-cpp_evaluator/build/
+my_cpp/build/
 apache-jmeter-5.6.3/
 spice_cache/
 SPICE-1.0/

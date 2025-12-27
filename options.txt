@@ -4,7 +4,7 @@ python -m Agent.data_agent "What were the sales in November 2021?" `
   --lookup-only `
   --output-csv "results/sales_november_2021.csv" `
   --expected-csv "results/real_sales_november_2021.csv" `
-  --evaluator-exe ".\cpp_evaluator\build\resultcmp.exe" `
+  --evaluator-exe ".\my_cpp\build\resultcmp.exe" `
   --eval-keys "week,store_id"
 
   python -m Agent.data_agent "What were the sales in November 2021?" `
