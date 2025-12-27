@@ -63,6 +63,8 @@ def get_evaluation_functions(
     spice_jar: Optional[str] = None,
     spice_java_bin: str = "java",
     llm_text_eval: bool = False,
+    llm_judge_model: Optional[str] = None,
+    ollama_url: Optional[str] = None,
 ) -> tuple[Optional[callable], Optional[callable]]:
     """Get evaluation functions based on command-line arguments.
     
@@ -120,8 +122,8 @@ def get_evaluation_functions(
             print(f"Failed to read expected analysis file: {str(e)}")
             gt_text = None
 
-    if gt_text_path and gt_text and not lookup_only:
-        if spice_text_eval:
+    if not lookup_only:
+        if spice_text_eval and gt_text_path and gt_text:
             try:
                 check_spice_jar_runnable(spice_jar=spice_jar, java_bin=spice_java_bin)
             except Exception as e:
@@ -129,18 +131,23 @@ def get_evaluation_functions(
             
             text_eval_fn = partial(spice_score_java, reference=gt_text, spice_jar=spice_jar, java_bin=spice_java_bin)
             
-        elif bleu_text_eval:
+        elif bleu_text_eval and gt_text_path and gt_text:
             if bleu_nltk:
                 text_eval_fn = partial(bleu_score_nltk,reference=gt_text, max_n=4, smooth=True)
             else:  # simple
                 text_eval_fn = partial(bleu_score,reference=gt_text, max_n=4, smooth=True)
                 
-        elif llm_text_eval:
-            def text_eval_llm(generated_text: str, expected_text: str) -> float:
-                """LLM-as-judge text evaluator."""
-                # TODO: Implement LLM-as-judge evaluation
-                print(f"[Text Eval] LLM-as-judge: comparing texts")
-                return 0.0  # Placeholder
+        elif llm_text_eval and llm_judge_model:
+            def text_eval_llm(generated_text: str, prompt:str, sql_query:str, data:str) -> float:
+                score, _ = judge_analysis(
+                        prompt=prompt,
+                        sql_query=sql_query,
+                        data=data,
+                        analysis=generated_text,
+                        judge_model=llm_judge_model,
+                        ollama_url=ollama_url
+                    )
+                return score
             text_eval_fn = text_eval_llm
     
     return csv_eval_fn, text_eval_fn
@@ -477,3 +484,133 @@ def spice_score_java(
             return float(f1) if f1 is not None else 0.0
         except Exception:
             return 0.0
+        
+def judge_analysis(
+    prompt: str,
+    sql_query: str,
+    data: str,
+    analysis: str,
+    judge_model: str = "gpt-oss:20b",
+    ollama_url: str = "http://localhost:11434"
+) -> Tuple[float, Dict]:
+    """Evaluate data analysis quality using LLM-as-a-Judge.
+    
+    Args:
+        prompt: Original user question
+        sql_query: SQL query that was executed
+        data: SQL results (ground truth)
+        analysis: LLM's analysis text to evaluate
+        judge_model: Ollama model name for judging (default: llama3.1:70b)
+        ollama_url: Ollama server URL
+    
+    Returns:
+        float: Overall score (0,1) = average of correctness, completeness, faithfulness and the detailed_evaluation of the judge
+    """
+    from langchain_ollama import ChatOllama
+    
+    JUDGE_PROMPT = """You are an expert evaluator assessing a data analysis response.
+For the evaluation is important you consider the information that was available for the analysis, if the SQL result is wrong or has missing data, this problem shouldn't affect the analysis score.
+
+### CONTEXT
+USER QUESTION: {prompt}
+SQL QUERY: {sql_query}
+SQL RESULTS: 
+{data}
+
+### ANALYSIS TO EVALUATE
+{analysis}
+
+### EVALUATION RUBRIC (Rate 1-5 for each)
+
+**CORRECTNESS (1-5)**
+Does the analysis accurately interpret the SQL results? Are numerical values correct?
+[1=Wrong, 3=Mostly correct, 5=Perfect]
+
+**COMPLETENESS (1-5)**
+Does it fully address all parts of the user's question using available data?
+[1=Incomplete, 3=Main points covered, 5=Comprehensive]
+
+**FAITHFULNESS (1-5)**
+Does it only use information from SQL results? No hallucinated facts?
+[1=Major hallucinations, 3=Minor issues, 5=Fully grounded]
+
+### OUTPUT
+Return ONLY valid JSON:
+{{
+  "correctness": {{"score": <1-5>, "reasoning": "<brief>", "issues": []}},
+  "completeness": {{"score": <1-5>, "reasoning": "<brief>", "missing": []}},
+  "faithfulness": {{"score": <1-5>, "reasoning": "<brief>", "hallucinations": []}}
+}}"""
+
+    try:
+        # Create judge LLM
+        judge_llm = ChatOllama(
+            model=judge_model,
+            temperature=0.2,
+            base_url=ollama_url,
+            max_tokens=1000
+        )
+        
+        # Truncate data if too long
+        truncated_data = data[:2000] if len(data) > 2000 else data
+        
+        # Get judgment
+        formatted_prompt = JUDGE_PROMPT.format(
+            prompt=prompt,
+            sql_query=sql_query,
+            data=truncated_data,
+            analysis=analysis
+        )
+        
+        response = judge_llm.invoke(formatted_prompt)
+        raw_content = response.content if hasattr(response, "content") else str(response)
+        
+        # Parse JSON
+        evaluation = _parse_judge_json(raw_content)
+        
+        # Compute overall score (average of 3 criteria)
+        scores = [
+            evaluation.get("correctness", {}).get("score", 0),
+            evaluation.get("completeness", {}).get("score", 0),
+            evaluation.get("faithfulness", {}).get("score", 0)
+        ]
+        score = sum(scores) / 3.0
+        overall_score = (score - 1) / 4.0
+        
+        evaluation["overall_score"] = overall_score
+        return overall_score, evaluation
+            
+    except Exception as e:
+        print(f"Judge evaluation error: {e}")
+        return (0.0, {"error": str(e)})
+
+
+def _parse_judge_json(raw_text: str) -> Dict:
+    """Parse judge JSON response with robust error handling."""
+    try:
+        # Clean markdown and find JSON
+        content = raw_text.strip().replace("``````", "").strip()
+        if content.lower().startswith("json"):
+            content = content[4:].strip()
+        
+        start = content.find("{")
+        end = content.rfind("}")
+        
+        if start != -1 and end != -1:
+            parsed = json.loads(content[start:end+1])
+            
+            # Ensure all criteria exist
+            for criterion in ["correctness", "completeness", "faithfulness"]:
+                if criterion not in parsed:
+                    parsed[criterion] = {"score": 0, "reasoning": "Missing", "issues": []}
+            
+            return parsed
+    except Exception as e:
+        print(f"JSON parse error: {e}")
+    
+    # Fallback
+    return {
+        "correctness": {"score": 0, "reasoning": "Parse failed", "issues": []},
+        "completeness": {"score": 0, "reasoning": "Parse failed", "missing": []},
+        "faithfulness": {"score": 0, "reasoning": "Parse failed", "hallucinations": []}
+    }

@@ -668,7 +668,7 @@ class SalesDataAgent:
             print("[LangGraph] LangGraph execution completed")
             return result
     
-    def _run_with_evaluation(
+    def run_with_evaluation(
         self,
         *,
         prompt: str,
@@ -681,6 +681,7 @@ class SalesDataAgent:
         csv_eval_fn: Optional[callable] = None,
         text_eval_fn: Optional[callable] = None,
         save_dir: Optional[str] = None,
+        llm_text_eval: bool = False,
     ) -> Dict:
         """Core evaluation logic extracted from run() for CodeCarbon wrapping."""
         
@@ -727,7 +728,10 @@ class SalesDataAgent:
                     result["csv_score"] = csv_score
                 
                 if text_eval_fn:
-                    text_score = text_eval_fn(analysis_text)
+                    if llm_text_eval:
+                        text_score = text_eval_fn(generated_text=analysis_text, prompt=result.get("prompt", ""), sql_query=result.get("sql_query", ""), data=result.get("data",""))
+                    else:
+                        text_score = text_eval_fn(analysis_text)
                     score += text_score
                     result["text_score"] = text_score
                 
@@ -767,6 +771,7 @@ class SalesDataAgent:
         text_eval_fn: Optional[callable] = None,
         save_dir: Optional[str] = None,
         enable_codecarbon: bool = False,
+        llm_text_eval: bool = False,
     ) -> Dict:
         
         if save_dir is None:
@@ -785,7 +790,7 @@ class SalesDataAgent:
                     measure_power_secs=1,
                     log_level="error",
                 ):
-                    return self._run_with_evaluation(
+                    return self.run_with_evaluation(
                         prompt=prompt,
                         visualization_goal=visualization_goal,
                         lookup_only=lookup_only,
@@ -796,12 +801,13 @@ class SalesDataAgent:
                         csv_eval_fn=csv_eval_fn,
                         text_eval_fn=text_eval_fn,
                         save_dir=save_dir,
+                        llm_text_eval=llm_text_eval,
                     )
             except Exception as e:
                 print(f"CodeCarbon tracking failed: {e}, continuing without it")
                 # Fall through to run without CodeCarbon
         
-        return self._run_with_evaluation(
+        return self.run_with_evaluation(
             prompt=prompt,
             visualization_goal=visualization_goal,
             lookup_only=lookup_only,
@@ -812,6 +818,7 @@ class SalesDataAgent:
             csv_eval_fn=csv_eval_fn,
             text_eval_fn=text_eval_fn,
             save_dir=save_dir,
+            llm_text_eval=llm_text_eval,
         )
 
 __all__ = ["SalesDataAgent", "State"]
@@ -827,6 +834,7 @@ if __name__ == "__main__":
     parser.add_argument("--data", dest="data_path", type=str, default=DEFAULT_DATA_PATH, help="Path to parquet file")
     parser.add_argument("--goal", dest="visualization_goal", type=str, default=None, help="Optional visualization goal")
     parser.add_argument("--model", type=str, default="llama3.2:3b", help="Ollama model name")
+    parser.add_argument("--ollama_url", type=str, default="http://localhost:11434", help="Ollama url")
        
     # Agent type options
     agent_group = parser.add_mutually_exclusive_group()
@@ -854,6 +862,7 @@ if __name__ == "__main__":
     parser.add_argument("--bleu_nltk", action="store_true", help="Use nltk for BLEU implementation instead of simple BLEU")
     parser.add_argument("--spice_jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar)")
     parser.add_argument("--spice_java_bin", type=str, default="java", help="Java executable for SPICE")
+    parser.add_argument("--llm_judge_model", type=str, help="Model for llm as a judge")
 
     # Phoenix tracking options
     parser.add_argument("--enable_tracing", action="store_true", help="Enable Phoenix tracing/tracking")
@@ -873,6 +882,7 @@ if __name__ == "__main__":
         enable_tracing=args.enable_tracing,
         phoenix_endpoint=args.phoenix_endpoint,
         project_name=args.project_name,
+        ollama_url=args.ollama_url
     )
 
     # Get evaluation functions based on arguments
@@ -887,10 +897,12 @@ if __name__ == "__main__":
         iou_type=args.iou_type,
         spice_text_eval=args.spice_text_eval,
         bleu_text_eval=args.bleu_text_eval,
-        llm_text_eval=args.llm_text_eval,
         bleu_nltk=args.bleu_nltk,
         spice_jar=args.spice_jar,
         spice_java_bin=args.spice_java_bin,
+        llm_text_eval=args.llm_text_eval,
+        llm_judge_model=args.llm_judge_model,
+        ollama_url=args.ollama_url,
     )
 
     # Run agent
@@ -906,6 +918,7 @@ if __name__ == "__main__":
         text_eval_fn=text_eval_fn,
         save_dir=args.save_dir,
         enable_codecarbon=args.enable_codecarbon,
+        llm_text_eval=args.llm_text_eval
     )
     
     # Print results
