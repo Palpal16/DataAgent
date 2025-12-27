@@ -43,7 +43,7 @@ temperature: 0.1
 #   lookup_only: Only fetch data (fastest)
 #   analysis:    Fetch data + analyze (no visualization)
 #   full:        Complete pipeline with visualization code
-agent_mode: "lookup_only"
+agent_mode: "analysis"
 
 # ================================================================================
 # BEST-OF-N SAMPLING
@@ -64,7 +64,7 @@ temperature_max: null
 
 # Directory to save results (CSV, analysis, all_results.json)
 # If null, creates a temporary directory
-save_dir: null
+save_dir: ./output
 
 # ================================================================================
 # GROUND TRUTH (Single Query Evaluation)
@@ -129,7 +129,7 @@ llm_judge:
 #   "gt_analysis": "...",              # Used as gt_text
 #   "gt_sql": "..."                    # Optional, for reference only
 # }, ...]
-test_cases_json: null
+test_cases_json: ./evaluation/gpt_columns_dataset.json
 
 # Run in batch mode (process all test cases in JSON file)
 # When true, ignores single prompt/gt_csv/gt_text settings
@@ -147,6 +147,7 @@ phoenix:
   endpoint: "http://localhost:6006/v1/traces"
   project_name: "evaluating-agent"
   api_key: null  # Optional API key for cloud Phoenix
+  auto_start: true
 
 # ================================================================================
 # ENERGY TRACKING

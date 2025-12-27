@@ -920,13 +920,3 @@ if __name__ == "__main__":
         enable_codecarbon=args.enable_codecarbon,
         llm_text_eval=args.llm_text_eval
     )
-    
-    # Print results
-    print("\n" + "="*60)
-    print("FINAL RESULTS")
-    print("="*60)
-    if args.best_of_n > 1:
-        print(f"Score variance: {score_variance:.4f}")
-    print(f"Answer: {output.get('answer', [])}")
-    if args.save_dir or args.best_of_n > 1:
-        print(f"Results saved to: {args.save_dir or 'temp directory'}")

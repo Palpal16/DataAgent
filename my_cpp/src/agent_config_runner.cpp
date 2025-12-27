@@ -9,7 +9,27 @@
 #include <string>
 #include <vector>
 #include <cstdio>
+#include <ctime>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+static pid_t phoenix_pid = 0;
+
+void cleanup_phoenix() {
+    if (phoenix_pid > 0) {
+        std::cout << "[Cleanup] Stopping Phoenix server (PID: " << phoenix_pid << ")" << std::endl;
+        kill(phoenix_pid, SIGTERM);
+        waitpid(phoenix_pid, NULL, 0);
+        phoenix_pid = 0;
+    }
+}
+
+void signal_handler(int signum) {
+    std::cout << "\n[Signal] Caught signal " << signum << ", cleaning up..." << std::endl;
+    cleanup_phoenix();
+    exit(signum);
+}
 
 class SimpleYAML {
 public:
@@ -43,6 +63,7 @@ public:
         std::string phoenix_endpoint;
         std::string phoenix_project_name;
         std::string phoenix_api_key;
+        bool phoenix_auto_start;
         bool enable_codecarbon;
     };
 
@@ -55,6 +76,7 @@ public:
         cfg.bleu_use_nltk = false;
         cfg.run_batch = false;
         cfg.enable_tracing = false;
+        cfg.phoenix_auto_start = true;
         cfg.enable_codecarbon = false;
         cfg.model = "llama3.2:3b";
         cfg.ollama_url = "http://localhost:11434";
@@ -74,25 +96,25 @@ public:
 
         std::string line, current_section;
         int base_indent = -1;
-        
+
         while (std::getline(file, line)) {
             std::string original = line;
             size_t comment_pos = line.find('#');
             if (comment_pos != std::string::npos) {
                 line = line.substr(0, comment_pos);
             }
-            
+
             line = trim(line);
             if (line.empty()) continue;
-            
+
             int indent = getIndent(original);
-            
+
             if (line.find(':') != std::string::npos) {
                 auto pos = line.find(':');
                 std::string key = trim(line.substr(0, pos));
                 std::string value = trim(line.substr(pos + 1));
                 value = unquote(value);
-                
+
                 if (base_indent == -1 || indent <= base_indent) {
                     base_indent = indent;
                     current_section = "";
@@ -102,14 +124,14 @@ public:
                         current_section = key;
                         continue;
                     }
-                    
+
                     if (!current_section.empty()) {
                         key = current_section + "." + key;
                     }
                 }
-                
+
                 if (value == "null" || value.empty()) continue;
-                
+
                 if (key == "prompt") cfg.prompt = value;
                 else if (key == "data_path") cfg.data_path = value;
                 else if (key == "visualization_goal") cfg.visualization_goal = value;
@@ -139,6 +161,7 @@ public:
                 else if (key == "phoenix.endpoint") cfg.phoenix_endpoint = value;
                 else if (key == "phoenix.project_name") cfg.phoenix_project_name = value;
                 else if (key == "phoenix.api_key") cfg.phoenix_api_key = value;
+                else if (key == "phoenix.auto_start") cfg.phoenix_auto_start = (value == "true");
                 else if (key == "enable_codecarbon") cfg.enable_codecarbon = (value == "true");
             }
         }
@@ -197,14 +220,14 @@ public:
         while ((pos = content.find("{", pos)) != std::string::npos) {
             size_t end = findMatchingBrace(content, pos);
             if (end == std::string::npos) break;
-            
+
             std::string obj = content.substr(pos, end - pos + 1);
             JSONTestCase tc;
             tc.prompt = extractValue(obj, "prompt");
             tc.gt_data = extractValue(obj, "gt_data");
             tc.gt_analysis = extractValue(obj, "gt_analysis");
             tc.gt_sql = extractValue(obj, "gt_sql");
-            
+
             if (!tc.prompt.empty()) {
                 cases.push_back(tc);
             }
@@ -230,16 +253,16 @@ private:
         std::string searchKey = "\"" + key + "\"";
         size_t pos = obj.find(searchKey);
         if (pos == std::string::npos) return "";
-        
+
         pos = obj.find(':', pos);
         if (pos == std::string::npos) return "";
         pos++;
-        
+
         while (pos < obj.size() && (obj[pos] == ' ' || obj[pos] == '\t')) pos++;
-        
+
         if (pos >= obj.size() || obj[pos] != '"') return "";
         pos++;
-        
+
         std::string value;
         bool escaped = false;
         while (pos < obj.size()) {
@@ -277,83 +300,108 @@ static std::string quote_arg(const std::string& s) {
     return out;
 }
 
-std::string build_command(const SimpleYAML::Config& cfg, const std::string& prompt = "", 
+pid_t start_phoenix(const SimpleYAML::Config& cfg) {
+    if (!cfg.enable_tracing || !cfg.phoenix_auto_start) {
+        return 0;
+    }
+
+    std::cout << "[Phoenix] Starting phoenix serve in background..." << std::endl;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+        execl("/bin/sh", "sh", "-c", "phoenix serve", (char*)NULL);
+        exit(1);
+    } else if (pid > 0) {
+        std::cout << "[Phoenix] Started with PID: " << pid << std::endl;
+        std::cout << "[Phoenix] Waiting 3 seconds for server to initialize..." << std::endl;
+        sleep(3);
+        return pid;
+    } else {
+        std::cerr << "[Phoenix] Failed to start" << std::endl;
+        return 0;
+    }
+}
+
+std::string build_command(const SimpleYAML::Config& cfg, const std::string& prompt = "",
                          const std::string& gt_csv = "", const std::string& gt_text = "") {
     std::ostringstream cmd;
     cmd << "python -m Agent.data_agent";
-    
+
     std::string use_prompt = prompt.empty() ? cfg.prompt : prompt;
     std::string use_gt_csv = gt_csv.empty() ? cfg.gt_csv : gt_csv;
     std::string use_gt_text = gt_text.empty() ? cfg.gt_text : gt_text;
-    
+
     cmd << " " << quote_arg(use_prompt);
-    
+
     if (!cfg.data_path.empty()) cmd << " --data " << quote_arg(cfg.data_path);
     if (!cfg.visualization_goal.empty()) cmd << " --goal " << quote_arg(cfg.visualization_goal);
     if (!cfg.model.empty()) cmd << " --model " << quote_arg(cfg.model);
     if (!cfg.ollama_url.empty()) cmd << " --ollama_url " << quote_arg(cfg.ollama_url);
-    
+
     cmd << " --temp " << cfg.temperature;
-    
+
     if (cfg.agent_mode == "lookup_only") {
         cmd << " --lookup_only";
     } else if (cfg.agent_mode == "analysis") {
         cmd << " --no_vis";
     }
-    
+
     if (cfg.best_of_n > 1) {
         cmd << " --best_of_n " << cfg.best_of_n;
         if (!cfg.temperature_max.empty()) {
             cmd << " --temp-max " << cfg.temperature_max;
         }
     }
-    
+
     if (!cfg.save_dir.empty()) cmd << " --save_dir " << quote_arg(cfg.save_dir);
     if (!use_gt_csv.empty()) cmd << " --gt_csv " << quote_arg(use_gt_csv);
     if (!use_gt_text.empty()) cmd << " --gt_text " << quote_arg(use_gt_text);
-    
+
     if (cfg.enable_csv_eval) {
         if (cfg.csv_eval_method == "python") {
             cmd << " --py_csv_eval";
         } else if (cfg.csv_eval_method == "cpp") {
             cmd << " --cpp_csv_eval";
-            if (!cfg.cpp_evaluator_exe.empty()) 
+            if (!cfg.cpp_evaluator_exe.empty())
                 cmd << " --evaluator_exe " << quote_arg(cfg.cpp_evaluator_exe);
-            if (!cfg.cpp_evaluator_keys.empty()) 
+            if (!cfg.cpp_evaluator_keys.empty())
                 cmd << " --eval_keys " << quote_arg(cfg.cpp_evaluator_keys);
         }
         cmd << " --iou_type " << cfg.csv_iou_type;
     }
-    
+
     if (cfg.enable_text_eval) {
         if (cfg.text_eval_method == "bleu") {
             cmd << " --bleu_text_eval";
             if (cfg.bleu_use_nltk) cmd << " --bleu_nltk";
         } else if (cfg.text_eval_method == "spice") {
             cmd << " --spice_text_eval";
-            if (!cfg.spice_jar_path.empty()) 
+            if (!cfg.spice_jar_path.empty())
                 cmd << " --spice_jar " << quote_arg(cfg.spice_jar_path);
-            if (!cfg.spice_java_bin.empty()) 
+            if (!cfg.spice_java_bin.empty())
                 cmd << " --spice_java_bin " << quote_arg(cfg.spice_java_bin);
         } else if (cfg.text_eval_method == "llm") {
             cmd << " --llm_text_eval";
-            if (!cfg.llm_judge_model.empty()) 
+            if (!cfg.llm_judge_model.empty())
                 cmd << " --llm_judge_model " << quote_arg(cfg.llm_judge_model);
         }
     }
-    
+
     if (cfg.enable_tracing) {
         cmd << " --enable_tracing";
-        if (!cfg.phoenix_endpoint.empty()) 
+        if (!cfg.phoenix_endpoint.empty())
             cmd << " --phoenix_endpoint " << quote_arg(cfg.phoenix_endpoint);
-        if (!cfg.phoenix_project_name.empty()) 
+        if (!cfg.phoenix_project_name.empty())
             cmd << " --project_name " << quote_arg(cfg.phoenix_project_name);
     }
-    
+
     if (cfg.enable_codecarbon) {
         cmd << " --enable_codecarbon";
     }
-    
+
     return cmd.str();
 }
 
@@ -364,46 +412,53 @@ int write_temp_file(const std::string& content, std::string& out_path) {
         std::cerr << "Error: Could not create temporary file" << std::endl;
         return -1;
     }
-    
+
     FILE* f = fdopen(fd, "w");
     if (!f) {
         close(fd);
         return -1;
     }
-    
+
     fputs(content.c_str(), f);
     fclose(f);
-    
+
     out_path = temp_template;
     return 0;
 }
 
 int main(int argc, char** argv) {
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+
     std::string config_file = "agent_config.yaml";
-    
+
     if (argc > 1) {
         config_file = argv[1];
     }
-    
+
     std::cout << "[ConfigRunner] Loading configuration from: " << config_file << std::endl;
     auto cfg = SimpleYAML::parse(config_file);
-    
+
+    phoenix_pid = start_phoenix(cfg);
+
+    int exit_code = 0;
+
     if (cfg.run_batch && !cfg.test_cases_json.empty()) {
         std::cout << "[ConfigRunner] Running in batch mode" << std::endl;
         auto test_cases = SimpleJSONParser::parse(cfg.test_cases_json);
         std::cout << "[ConfigRunner] Loaded " << test_cases.size() << " test cases" << std::endl;
-        
+
         int success_count = 0;
         int fail_count = 0;
-        
+
         for (size_t i = 0; i < test_cases.size(); ++i) {
             std::cout << "\n" << std::string(80, '=') << std::endl;
             std::cout << "[ConfigRunner] Test case " << (i + 1) << "/" << test_cases.size() << std::endl;
-            std::cout << "[ConfigRunner] Prompt: " << test_cases[i].prompt.substr(0, 60) 
+            std::cout << "[ConfigRunner] Prompt: " << test_cases[i].prompt.substr(0, 60)
                       << (test_cases[i].prompt.size() > 60 ? "..." : "") << std::endl;
-            
+
             std::string gt_csv_file, gt_text_file;
-            
+
             if (!test_cases[i].gt_data.empty()) {
                 if (write_temp_file(test_cases[i].gt_data, gt_csv_file) != 0) {
                     std::cerr << "[ConfigRunner] Failed to create temp CSV file" << std::endl;
@@ -411,7 +466,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
             }
-            
+
             if (!test_cases[i].gt_analysis.empty()) {
                 if (write_temp_file(test_cases[i].gt_analysis, gt_text_file) != 0) {
                     std::cerr << "[ConfigRunner] Failed to create temp text file" << std::endl;
@@ -420,61 +475,65 @@ int main(int argc, char** argv) {
                     continue;
                 }
             }
-            
+
             std::string save_dir = cfg.save_dir;
             if (!save_dir.empty()) {
                 save_dir = save_dir + "/test_" + std::to_string(i + 1);
                 std::string mkdir_cmd = "mkdir -p " + quote_arg(save_dir);
                 system(mkdir_cmd.c_str());
             }
-            
+
             SimpleYAML::Config test_cfg = cfg;
             test_cfg.save_dir = save_dir;
-            
+
             std::string cmd = build_command(test_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file);
-            
+
             std::cout << "[ConfigRunner] Executing: " << cmd << std::endl;
             int result = system(cmd.c_str());
-            
+
             if (!gt_csv_file.empty()) remove(gt_csv_file.c_str());
             if (!gt_text_file.empty()) remove(gt_text_file.c_str());
-            
+
             if (result == 0) {
                 std::cout << "[ConfigRunner] Test case " << (i + 1) << " PASSED" << std::endl;
                 success_count++;
             } else {
-                std::cout << "[ConfigRunner] Test case " << (i + 1) << " FAILED (exit code: " 
+                std::cout << "[ConfigRunner] Test case " << (i + 1) << " FAILED (exit code: "
                           << result << ")" << std::endl;
                 fail_count++;
             }
         }
-        
+
         std::cout << "\n" << std::string(80, '=') << std::endl;
         std::cout << "[ConfigRunner] Batch processing complete" << std::endl;
         std::cout << "[ConfigRunner] Success: " << success_count << " / " << test_cases.size() << std::endl;
         std::cout << "[ConfigRunner] Failed: " << fail_count << " / " << test_cases.size() << std::endl;
-        
-        return (fail_count > 0) ? 1 : 0;
-        
+
+        exit_code = (fail_count > 0) ? 1 : 0;
+
     } else {
         std::cout << "[ConfigRunner] Running in single query mode" << std::endl;
-        
+
         if (cfg.prompt.empty()) {
             std::cerr << "Error: No prompt specified in config" << std::endl;
+            cleanup_phoenix();
             return 2;
         }
-        
+
         std::string cmd = build_command(cfg);
         std::cout << "[ConfigRunner] Executing: " << cmd << std::endl;
-        
+
         int result = system(cmd.c_str());
-        
+
         if (result == 0) {
             std::cout << "[ConfigRunner] Execution completed successfully" << std::endl;
         } else {
             std::cout << "[ConfigRunner] Execution failed with exit code: " << result << std::endl;
         }
-        
-        return result;
+
+        exit_code = result;
     }
+
+    cleanup_phoenix();
+    return exit_code;
 }
