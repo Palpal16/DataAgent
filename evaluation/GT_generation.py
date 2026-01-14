@@ -12,7 +12,7 @@ workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
-PREFIX = 'gpt_columns' #options: 'our', 'claude', 'gpt', 'gpt_columns'
+PREFIX = 'our' #options: 'our', 'claude', 'gpt', 'gpt_columns'
 
 TRANSACTION_DATA_FILE_PATH = 'data/Store_Sales_Price_Elasticity_Promotions_Data.parquet'
 DATASET_FILE_PATH = f"evaluation/{PREFIX}_dataset.json"
@@ -26,11 +26,11 @@ queries = {
         "Create a bar chart showing total sales by store",
         "What was the average transaction value?",
         "Retrieve the sales made in November 2021 and December 2021 and tell me when more money were earned?",
-        "Show me the sales in Nov 2021",
         "Collect sales data for December 2021 and tell which day had the highest sales?",
         "How many products were sold for a promo in May 2023?",
         "Weekly sales in 2021",
-        "Extract the first and last sale in time order"
+        "Extract the first and last sale in time order",
+        "Show me the sales in Nov 2021 with value higher than 100"
     ],
     'claude': [
         "What are the total sales and quantity sold for each store in 2023?",
@@ -93,7 +93,13 @@ The output of the SQL you can use to answer is this data: {data}
 Format your response as a single continuous line with no line breaks, using semicolons or commas to separate items.
 """
 
-dataset = []
+if os.path.exists(DATASET_FILE_PATH):
+    with open(DATASET_FILE_PATH, 'r') as f:
+        dataset = json.load(f)
+    print(f'\nLoaded existing dataset with {len(dataset)} entries.')
+else:
+    dataset = []
+    print('\nNo existing dataset found. Starting fresh.')
 
 # Loop over all questions and ask user to input SQL and analysis for each
 for i, prompt in enumerate(queries[PREFIX]):

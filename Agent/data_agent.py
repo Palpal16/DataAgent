@@ -742,7 +742,8 @@ class SalesDataAgent:
                 
             except Exception as e:
                 print(f"Error: {str(e)}")
-                
+
+        print(f"\n[Agent] Completed best-of-{best_of_n} runs. Results: {len(all_results)} completed, Overall scores: {all_scores}")
         self.llm.temperature = original_temp
         if not all_scores:
             return {}, 0.0

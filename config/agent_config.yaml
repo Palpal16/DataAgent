@@ -81,7 +81,7 @@ gt_text: null
 # ================================================================================
 
 # Enable CSV evaluation (requires gt_csv)
-enable_csv_eval: false
+enable_csv_eval: true
 
 # CSV evaluation method
 csv_eval_method: "python"  # Options: python | cpp
@@ -99,7 +99,7 @@ cpp_evaluator:
 # ================================================================================
 
 # Enable text evaluation (requires gt_text)
-enable_text_eval: false
+enable_text_eval: true
 
 # Text evaluation method
 # Options: bleu | spice | llm
@@ -129,11 +129,11 @@ llm_judge:
 #   "gt_analysis": "...",              # Used as gt_text
 #   "gt_sql": "..."                    # Optional, for reference only
 # }, ...]
-test_cases_json: ./evaluation/gpt_columns_dataset.json
+test_cases_json: ./evaluation/our_dataset.json
 
 # Run in batch mode (process all test cases in JSON file)
 # When true, ignores single prompt/gt_csv/gt_text settings
-run_batch: false
+run_batch: true
 
 # ================================================================================
 # TRACING & MONITORING
