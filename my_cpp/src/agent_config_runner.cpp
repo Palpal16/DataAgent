@@ -579,48 +579,15 @@ std::string build_command(const SimpleYAML::Config& cfg, const std::string& prom
     return cmd.str();
 }
 
-int write_temp_file(const std::string& content, std::string& out_path) {
-    if (temp_dir == "/tmp") {
-        char temp_template[] = "/tmp/agent_gt_XXXXXX";
-        int fd = mkstemp(temp_template);
-        if (fd == -1) {
-            std::cerr << "Error: Could not create temporary file" << std::endl;
-            return -1;
-        }
-
-        FILE* f = fdopen(fd, "w");
-        if (!f) {
-            close(fd);
-            return -1;
-        }
-
-        fputs(content.c_str(), f);
-        fclose(f);
-
-        out_path = temp_template;
-        return 0;
+int write_file(const std::string& filepath, const std::string& content) {
+    std::ofstream out(filepath, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        std::cerr << "Error: Could not create file: " << filepath << std::endl;
+        return -1;
     }
-
-    std::error_code ec;
-    std::filesystem::create_directories(temp_dir, ec);
-
-    for (int attempt = 0; attempt < 50; ++attempt) {
-        std::string candidate = make_temp_path(temp_dir, "agent_gt", ".txt");
-        if (std::filesystem::exists(candidate)) {
-            continue;
-        }
-        std::ofstream out(candidate, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) {
-            continue;
-        }
-        out << content;
-        out.close();
-        out_path = candidate;
-        return 0;
-    }
-
-    std::cerr << "Error: Could not create temporary file" << std::endl;
-    return -1;
+    out << content;
+    out.close();
+    return 0;
 }
 
 int main(int argc, char** argv) {
@@ -655,25 +622,26 @@ int main(int argc, char** argv) {
             std::cout << "[ConfigRunner] Prompt: " << test_cases[i].prompt.substr(0, 60)
                       << (test_cases[i].prompt.size() > 60 ? "..." : "") << std::endl;
 
-            std::string gt_csv_file, gt_text_file;
-            bool remove_gt_csv_temp = false;
-            bool remove_gt_text_temp = false;
-
             std::string save_dir = cfg.save_dir;
-            if (!save_dir.empty()) {
-                save_dir = save_dir + "/test_" + std::to_string(i + 1);
-                std::string mkdir_cmd = "mkdir -p " + quote_arg(save_dir);
-                int mkdir_rc = system(mkdir_cmd.c_str());
-                if (mkdir_rc != 0) {
-                    std::cerr << "[ConfigRunner] Warning: mkdir failed (code " << mkdir_rc << ")" << std::endl;
-                }
-                write_gt_results(std::filesystem::path(save_dir), test_cases[i]);
+            if (save_dir.empty()) {
+                save_dir = "./output";  // Use current directory as fallback
+            }
+            save_dir = save_dir + "/test_" + std::to_string(i + 1);
+
+            // Create directory
+            std::string mkdir_cmd = "mkdir -p " + quote_arg(save_dir);
+            int mkdir_rc = system(mkdir_cmd.c_str());
+            if (mkdir_rc != 0) {
+                std::cerr << "[ConfigRunner] Failed to create directory: " << save_dir << std::endl;
+                fail_count++;
+                continue;  // Skip this test case
             }
 
-            if (!save_dir.empty() && !test_cases[i].gt_data.empty()) {
-                gt_csv_file = (std::filesystem::path(save_dir) / "gt_data.csv").string();
-            } else if (!test_cases[i].gt_data.empty()) {
-                if (write_temp_file(test_cases[i].gt_data, gt_csv_file) != 0) {
+            std::string gt_csv_file, gt_text_file;
+
+            if (!test_cases[i].gt_data.empty()) {
+                gt_csv_file = save_dir + "/gt_data.txt";
+                if (write_file(gt_csv_file, test_cases[i].gt_data)  != 0) {
                     std::cerr << "[ConfigRunner] Failed to create temp CSV file" << std::endl;
                     fail_count++;
                     continue;
@@ -682,13 +650,12 @@ int main(int argc, char** argv) {
             }
 
             if (!test_cases[i].gt_analysis.empty()) {
-                if (write_temp_file(test_cases[i].gt_analysis, gt_text_file) != 0) {
+                gt_text_file = save_dir + "/gt_analysis.txt";
+                if (write_file(gt_text_file, test_cases[i].gt_analysis)!= 0) {
                     std::cerr << "[ConfigRunner] Failed to create temp text file" << std::endl;
-                    if (remove_gt_csv_temp && !gt_csv_file.empty()) remove(gt_csv_file.c_str());
                     fail_count++;
                     continue;
                 }
-                remove_gt_text_temp = true;
             }
 
             SimpleYAML::Config test_cfg = cfg;
@@ -698,9 +665,6 @@ int main(int argc, char** argv) {
 
             std::cout << "[ConfigRunner] Executing: " << cmd << std::endl;
             int result = system(cmd.c_str());
-
-            if (remove_gt_csv_temp && !gt_csv_file.empty()) remove(gt_csv_file.c_str());
-            if (remove_gt_text_temp && !gt_text_file.empty()) remove(gt_text_file.c_str());
 
             if (result == 0) {
                 std::cout << "[ConfigRunner] Test case " << (i + 1) << " PASSED" << std::endl;
