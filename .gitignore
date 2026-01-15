@@ -18,6 +18,7 @@ apache-jmeter-5.6.3/
 spice_cache/
 SPICE-1.0/
 spice
+tmp/
 
 loop.py
 CMakePresets.json
