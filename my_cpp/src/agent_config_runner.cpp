@@ -112,11 +112,7 @@ public:
         cfg.spice_java_bin = "java";
         cfg.phoenix_endpoint = "http://localhost:6006/v1/traces";
         cfg.phoenix_project_name = "evaluating-agent";
-#ifdef _WIN32
         cfg.python_bin = "python";
-#else
-        cfg.python_bin = "python3";
-#endif
 
         std::ifstream file(filename);
         if (!file.is_open()) {
@@ -147,14 +143,9 @@ public:
 
                 if (base_indent == -1 || indent <= base_indent) {
                     base_indent = indent;
-                    current_section = "";
+                    if (value.empty()) current_section = key;
+                    else current_section = "";
                 } else if (indent > base_indent) {
-                    if (value.empty() || key == "cpp_evaluator" || key == "bleu" || 
-                        key == "spice" || key == "llm_judge" || key == "phoenix") {
-                        current_section = key;
-                        continue;
-                    }
-
                     if (!current_section.empty()) {
                         key = current_section + "." + key;
                     }
