@@ -89,6 +89,16 @@ def get_evaluation_functions(
     
     # CSV Evaluation
     if gt_csv_path:
+        # Convert text file to CSV if needed
+        if not gt_csv_path.endswith('.csv'):
+            with open(gt_csv_path, 'r', encoding='utf-8') as f:
+                gt_text = f.read()
+            gt_csv_rows = text_to_csv(gt_text)
+            new_csv_path = gt_csv_path[:-4] + '.csv' #From .txt to .csv
+            save_csv(gt_csv_rows, new_csv_path)
+            os.remove(gt_csv_path)
+            gt_csv_path = new_csv_path
+        
         if py_csv_eval:
             iou_type_map = {"columns": 0, "rows": 1, "table": 2}
             iou_index = iou_type_map.get(iou_type, 1)  # Default to rows (1)

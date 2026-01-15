@@ -94,7 +94,7 @@ enable_csv_eval: true
 csv_eval_method: "python"  # Options: python | cpp
 
 # IoU type for CSV comparison
-csv_iou_type: "rows"  # Options: rows | columns | table
+csv_iou_type: "table"  # Options: rows | columns | table
 
 # C++ evaluator settings (only used if csv_eval_method = cpp)
 cpp_evaluator:
