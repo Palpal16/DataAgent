@@ -33,9 +33,9 @@ from langgraph.graph import END, StateGraph
 from langchain_ollama import ChatOllama
 
 try:
-    from Agent.utils import text_to_csv, save_csv, get_evaluation_functions
+    from Agent.utils import text_to_csv, save_csv, get_evaluation_functions, compare_csv
 except ImportError:
-    from utils import text_to_csv, save_csv, get_evaluation_functions
+    from utils import text_to_csv, save_csv, get_evaluation_functions, compare_csv
 
 # Optional energy/emissions tracking via CodeCarbon
 try:
@@ -726,6 +726,13 @@ class SalesDataAgent:
                     csv_score = csv_eval_fn(csv_path)
                     score += csv_score
                     result["csv_score"] = csv_score
+                elif csv_path and save_dir:
+                    gt_csv_path = os.path.join(save_dir, "gt_data.csv")
+                    if os.path.exists(gt_csv_path):
+                        _, rows_iou, _ = compare_csv(csv_path, gt_csv_path)
+                        csv_score = rows_iou
+                        score += csv_score
+                        result["csv_score"] = csv_score
                 
                 if text_eval_fn:
                     if llm_text_eval:

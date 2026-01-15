@@ -12,6 +12,7 @@
 #include <ctime>
 #include <chrono>
 #include <filesystem>
+#include <cctype>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -331,6 +332,144 @@ static std::string quote_arg(const std::string& s) {
     return out;
 }
 
+static std::string trim_copy(const std::string& s) {
+    size_t start = 0;
+    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) {
+        start++;
+    }
+    size_t end = s.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
+        end--;
+    }
+    return s.substr(start, end - start);
+}
+
+static std::vector<std::string> split_pipe(const std::string& line) {
+    std::vector<std::string> parts;
+    std::string token;
+    std::istringstream iss(line);
+    while (std::getline(iss, token, '|')) {
+        token = trim_copy(token);
+        if (!token.empty()) {
+            parts.push_back(token);
+        }
+    }
+    return parts;
+}
+
+static std::vector<std::string> split_comma(const std::string& line) {
+    std::vector<std::string> parts;
+    std::string token;
+    std::istringstream iss(line);
+    while (std::getline(iss, token, ',')) {
+        token = trim_copy(token);
+        if (!token.empty()) {
+            parts.push_back(token);
+        }
+    }
+    return parts;
+}
+
+static std::vector<std::vector<std::string>> parse_text_table(const std::string& text) {
+    std::vector<std::vector<std::string>> rows;
+    std::istringstream input(text);
+    std::string line;
+    while (std::getline(input, line)) {
+        line = trim_copy(line);
+        if (line.empty()) continue;
+        std::vector<std::string> parts;
+        if (line.find("  ") != std::string::npos) {
+            std::istringstream iss(line);
+            std::string token;
+            while (iss >> token) {
+                parts.push_back(token);
+            }
+        } else if (line.find('|') != std::string::npos) {
+            parts = split_pipe(line);
+        } else {
+            parts = split_comma(line);
+        }
+        if (!parts.empty()) {
+            rows.push_back(parts);
+        }
+    }
+    return rows;
+}
+
+static std::string csv_escape(const std::string& value) {
+    bool needs_quotes = false;
+    for (char c : value) {
+        if (c == ',' || c == '"' || c == '\n' || c == '\r') {
+            needs_quotes = true;
+            break;
+        }
+    }
+    if (!needs_quotes) return value;
+    std::string out = "\"";
+    for (char c : value) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+static void write_csv_rows(const std::vector<std::vector<std::string>>& rows,
+                           const std::filesystem::path& path) {
+    std::ofstream out(path);
+    if (!out.is_open()) return;
+    for (const auto& row : rows) {
+        for (size_t i = 0; i < row.size(); ++i) {
+            if (i > 0) out << ",";
+            out << csv_escape(row[i]);
+        }
+        out << "\n";
+    }
+}
+
+static std::string json_escape(const std::string& s) {
+    std::ostringstream out;
+    for (char c : s) {
+        switch (c) {
+            case '\\': out << "\\\\"; break;
+            case '"': out << "\\\""; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default: out << c; break;
+        }
+    }
+    return out.str();
+}
+
+static void write_gt_results(const std::filesystem::path& save_dir,
+                             const JSONTestCase& tc) {
+    std::filesystem::create_directories(save_dir);
+    std::filesystem::path gt_csv_path = save_dir / "gt_data.csv";
+    std::filesystem::path gt_results_path = save_dir / "gt_results.json";
+
+    if (!tc.gt_data.empty()) {
+        auto rows = parse_text_table(tc.gt_data);
+        if (!rows.empty()) {
+            write_csv_rows(rows, gt_csv_path);
+        } else {
+            std::ofstream out(gt_csv_path);
+            if (out.is_open()) {
+                out << tc.gt_data;
+            }
+        }
+    }
+
+    std::ofstream out(gt_results_path);
+    if (!out.is_open()) return;
+    out << "{\n";
+    out << "  \"prompt\": \"" << json_escape(tc.prompt) << "\",\n";
+    out << "  \"gt_sql\": \"" << json_escape(tc.gt_sql) << "\",\n";
+    out << "  \"gt_data\": \"" << json_escape(tc.gt_data) << "\",\n";
+    out << "  \"gt_analysis\": \"" << json_escape(tc.gt_analysis) << "\"\n";
+    out << "}\n";
+}
+
 pid_t start_phoenix(const SimpleYAML::Config& cfg) {
     if (!cfg.enable_tracing || !cfg.phoenix_auto_start) {
         return 0;
@@ -517,23 +656,8 @@ int main(int argc, char** argv) {
                       << (test_cases[i].prompt.size() > 60 ? "..." : "") << std::endl;
 
             std::string gt_csv_file, gt_text_file;
-
-            if (!test_cases[i].gt_data.empty()) {
-                if (write_temp_file(test_cases[i].gt_data, gt_csv_file) != 0) {
-                    std::cerr << "[ConfigRunner] Failed to create temp CSV file" << std::endl;
-                    fail_count++;
-                    continue;
-                }
-            }
-
-            if (!test_cases[i].gt_analysis.empty()) {
-                if (write_temp_file(test_cases[i].gt_analysis, gt_text_file) != 0) {
-                    std::cerr << "[ConfigRunner] Failed to create temp text file" << std::endl;
-                    if (!gt_csv_file.empty()) remove(gt_csv_file.c_str());
-                    fail_count++;
-                    continue;
-                }
-            }
+            bool remove_gt_csv_temp = false;
+            bool remove_gt_text_temp = false;
 
             std::string save_dir = cfg.save_dir;
             if (!save_dir.empty()) {
@@ -543,6 +667,28 @@ int main(int argc, char** argv) {
                 if (mkdir_rc != 0) {
                     std::cerr << "[ConfigRunner] Warning: mkdir failed (code " << mkdir_rc << ")" << std::endl;
                 }
+                write_gt_results(std::filesystem::path(save_dir), test_cases[i]);
+            }
+
+            if (!save_dir.empty() && !test_cases[i].gt_data.empty()) {
+                gt_csv_file = (std::filesystem::path(save_dir) / "gt_data.csv").string();
+            } else if (!test_cases[i].gt_data.empty()) {
+                if (write_temp_file(test_cases[i].gt_data, gt_csv_file) != 0) {
+                    std::cerr << "[ConfigRunner] Failed to create temp CSV file" << std::endl;
+                    fail_count++;
+                    continue;
+                }
+                remove_gt_csv_temp = true;
+            }
+
+            if (!test_cases[i].gt_analysis.empty()) {
+                if (write_temp_file(test_cases[i].gt_analysis, gt_text_file) != 0) {
+                    std::cerr << "[ConfigRunner] Failed to create temp text file" << std::endl;
+                    if (remove_gt_csv_temp && !gt_csv_file.empty()) remove(gt_csv_file.c_str());
+                    fail_count++;
+                    continue;
+                }
+                remove_gt_text_temp = true;
             }
 
             SimpleYAML::Config test_cfg = cfg;
@@ -553,8 +699,8 @@ int main(int argc, char** argv) {
             std::cout << "[ConfigRunner] Executing: " << cmd << std::endl;
             int result = system(cmd.c_str());
 
-            if (!gt_csv_file.empty()) remove(gt_csv_file.c_str());
-            if (!gt_text_file.empty()) remove(gt_text_file.c_str());
+            if (remove_gt_csv_temp && !gt_csv_file.empty()) remove(gt_csv_file.c_str());
+            if (remove_gt_text_temp && !gt_text_file.empty()) remove(gt_text_file.c_str());
 
             if (result == 0) {
                 std::cout << "[ConfigRunner] Test case " << (i + 1) << " PASSED" << std::endl;

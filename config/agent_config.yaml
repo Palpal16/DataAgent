@@ -28,8 +28,8 @@ visualization_goal: null
 # ================================================================================
 
 # Python executable used by the C++ config runner
-#python_bin: "/mnt/c/Users/Recup/Documents/Polimi/PACS/DataAgent/.venv/Scripts/python.exe"
-python_bin: "python"
+python_bin: "/mnt/c/Users/Recup/Documents/Polimi/PACS/DataAgent/.venv/Scripts/python.exe"
+#python_bin: "python"
 # ================================================================================
 # MODEL CONFIGURATION
 # ================================================================================
@@ -136,8 +136,8 @@ llm_judge:
 #   "gt_analysis": "...",              # Used as gt_text
 #   "gt_sql": "..."                    # Optional, for reference only
 # }, ...]
-test_cases_json: ./evaluation/our_dataset.json
-
+#test_cases_json: ./evaluation/our_dataset.json
+test_cases_json: ./evaluation/our_dataset_test.json
 # Run in batch mode (process all test cases in JSON file)
 # When true, ignores single prompt/gt_csv/gt_text settings
 run_batch: true

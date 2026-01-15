@@ -45,6 +45,69 @@ def save_csv(rows: List[List[str]], filepath: str):
         writer = csv.writer(f)
         writer.writerows(rows)
 
+def find_case_by_prompt(cases: List[dict], prompt: str) -> Optional[dict]:
+    for case in cases:
+        if case.get("prompt") == prompt:
+            return case
+    return None
+
+def prepare_gt_from_dataset(
+    *,
+    prompt: str,
+    dataset_path: str,
+    output_dir: str,
+    gt_csv_filename: str = "gt_data.csv",
+    gt_results_filename: str = "gt_results.json",
+    gt_text_filename: str = "gt_analysis.txt",
+) -> Dict[str, Optional[str]]:
+    """Generate gt CSV/results files from dataset JSON for a prompt.
+
+    Returns paths for gt_csv, gt_text (if available), and gt_results, plus the matched case.
+    """
+    with open(dataset_path, "r", encoding="utf-8") as f:
+        cases = json.load(f)
+    case = find_case_by_prompt(cases, prompt)
+    if not case:
+        raise ValueError("Prompt not found in dataset JSON")
+
+    gt_data = case.get("gt_data", "")
+    if not gt_data:
+        raise ValueError("gt_data is missing for this prompt")
+
+    os.makedirs(output_dir, exist_ok=True)
+    gt_csv_path = os.path.join(output_dir, gt_csv_filename)
+    gt_results_path = os.path.join(output_dir, gt_results_filename)
+    gt_text_path = None
+
+    gt_rows = text_to_csv(gt_data)
+    if gt_rows:
+        save_csv(gt_rows, gt_csv_path)
+    else:
+        with open(gt_csv_path, "w", encoding="utf-8") as f:
+            f.write(gt_data)
+
+    gt_results = {
+        "prompt": case.get("prompt", ""),
+        "gt_sql": case.get("gt_sql", ""),
+        "gt_data": case.get("gt_data", ""),
+        "gt_analysis": case.get("gt_analysis", ""),
+    }
+    with open(gt_results_path, "w", encoding="utf-8") as f:
+        json.dump(gt_results, f, indent=2)
+
+    gt_analysis = case.get("gt_analysis", "")
+    if gt_analysis:
+        gt_text_path = os.path.join(output_dir, gt_text_filename)
+        with open(gt_text_path, "w", encoding="utf-8") as f:
+            f.write(gt_analysis)
+
+    return {
+        "gt_csv_path": gt_csv_path,
+        "gt_text_path": gt_text_path,
+        "gt_results_path": gt_results_path,
+        "case": case,
+    }
+
 def get_evaluation_functions(
     *,
     lookup_only: bool = False,
