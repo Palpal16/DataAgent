@@ -10,12 +10,36 @@
 #include <vector>
 #include <cstdio>
 #include <ctime>
+#include <chrono>
+#include <filesystem>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
 
 static pid_t phoenix_pid = 0;
 static pid_t api_pid = 0;
+static std::string temp_dir = "/tmp";
+
+static std::string determine_temp_dir(const std::string& python_bin) {
+    if (!python_bin.empty()) {
+        if (python_bin.find(".exe") != std::string::npos || python_bin.find("/mnt/") != std::string::npos) {
+            return "./tmp";
+        }
+    }
+    return "/tmp";
+}
+
+static std::string make_temp_path(const std::string& dir, const std::string& prefix, const std::string& suffix) {
+    static int counter = 0;
+    auto ts = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    std::ostringstream path;
+    path << dir;
+    if (!dir.empty() && dir.back() != '/') {
+        path << "/";
+    }
+    path << prefix << "_" << ts << "_" << counter++ << suffix;
+    return path.str();
+}
 
 void cleanup_processes() {
     if (api_pid > 0) {
@@ -44,6 +68,7 @@ public:
         std::string prompt;
         std::string data_path;
         std::string visualization_goal;
+        std::string python_bin;
         std::string model;
         std::string ollama_url;
         double temperature;
@@ -103,6 +128,11 @@ public:
         cfg.spice_java_bin = "java";
         cfg.phoenix_endpoint = "http://localhost:6006/v1/traces";
         cfg.phoenix_project_name = "evaluating-agent";
+#ifdef _WIN32
+        cfg.python_bin = "python";
+#else
+        cfg.python_bin = "python3";
+#endif
         cfg.jmeter_bin = "./apache-jmeter-5.6.3/bin/jmeter";
         cfg.jmx_folder = "./jmx_files";
         cfg.jmeter_output_folder = "./output";
@@ -156,6 +186,7 @@ public:
                 if (key == "prompt") cfg.prompt = value;
                 else if (key == "data_path") cfg.data_path = value;
                 else if (key == "visualization_goal") cfg.visualization_goal = value;
+                else if (key == "python_bin") cfg.python_bin = value;
                 else if (key == "model") cfg.model = value;
                 else if (key == "ollama_url") cfg.ollama_url = value;
                 else if (key == "temperature") cfg.temperature = std::stod(value);
@@ -453,8 +484,12 @@ pid_t start_background_process(const std::string& command, const std::string& na
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
-        freopen("/dev/null", "w", stdout);
-        freopen("/dev/null", "w", stderr);
+        if (!freopen("/dev/null", "w", stdout)) {
+            std::cerr << "[Startup] Warning: failed to redirect stdout" << std::endl;
+        }
+        if (!freopen("/dev/null", "w", stderr)) {
+            std::cerr << "[Startup] Warning: failed to redirect stderr" << std::endl;
+        }
         execl("/bin/sh", "sh", "-c", command.c_str(), (char*)NULL);
         exit(1);
     } else if (pid > 0) {
@@ -526,7 +561,10 @@ int run_jmeter(const SimpleYAML::Config& cfg) {
     fclose(f);
 
     std::string mkdir_cmd = "mkdir -p " + quote_arg(cfg.jmeter_output_folder);
-    system(mkdir_cmd.c_str());
+    int mkdir_rc = system(mkdir_cmd.c_str());
+    if (mkdir_rc != 0) {
+        std::cerr << "[JMeter] Warning: mkdir failed (code " << mkdir_rc << ")" << std::endl;
+    }
 
     time_t now = time(0);
     struct tm* ltm = localtime(&now);
@@ -562,7 +600,7 @@ int run_jmeter(const SimpleYAML::Config& cfg) {
 std::string build_command(const SimpleYAML::Config& cfg, const std::string& prompt = "",
                          const std::string& gt_csv = "", const std::string& gt_text = "") {
     std::ostringstream cmd;
-    cmd << "python -m Agent.data_agent";
+    cmd << (cfg.python_bin.empty() ? "python" : cfg.python_bin) << " -m Agent.data_agent";
 
     std::string use_prompt = prompt.empty() ? cfg.prompt : prompt;
     std::string use_gt_csv = gt_csv.empty() ? cfg.gt_csv : gt_csv;
@@ -640,24 +678,47 @@ std::string build_command(const SimpleYAML::Config& cfg, const std::string& prom
 }
 
 int write_temp_file(const std::string& content, std::string& out_path) {
-    char temp_template[] = "/tmp/agent_gt_XXXXXX";
-    int fd = mkstemp(temp_template);
-    if (fd == -1) {
-        std::cerr << "Error: Could not create temporary file" << std::endl;
-        return -1;
+    if (temp_dir == "/tmp") {
+        char temp_template[] = "/tmp/agent_gt_XXXXXX";
+        int fd = mkstemp(temp_template);
+        if (fd == -1) {
+            std::cerr << "Error: Could not create temporary file" << std::endl;
+            return -1;
+        }
+
+        FILE* f = fdopen(fd, "w");
+        if (!f) {
+            close(fd);
+            return -1;
+        }
+
+        fputs(content.c_str(), f);
+        fclose(f);
+
+        out_path = temp_template;
+        return 0;
     }
 
-    FILE* f = fdopen(fd, "w");
-    if (!f) {
-        close(fd);
-        return -1;
+    std::error_code ec;
+    std::filesystem::create_directories(temp_dir, ec);
+
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        std::string candidate = make_temp_path(temp_dir, "agent_gt", ".txt");
+        if (std::filesystem::exists(candidate)) {
+            continue;
+        }
+        std::ofstream out(candidate, std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) {
+            continue;
+        }
+        out << content;
+        out.close();
+        out_path = candidate;
+        return 0;
     }
 
-    fputs(content.c_str(), f);
-    fclose(f);
-
-    out_path = temp_template;
-    return 0;
+    std::cerr << "Error: Could not create temporary file" << std::endl;
+    return -1;
 }
 
 int run_direct_python(const SimpleYAML::Config& cfg) {
@@ -703,7 +764,10 @@ int run_direct_python(const SimpleYAML::Config& cfg) {
             if (!save_dir.empty()) {
                 save_dir = save_dir + "/test_" + std::to_string(i + 1);
                 std::string mkdir_cmd = "mkdir -p " + quote_arg(save_dir);
-                system(mkdir_cmd.c_str());
+                int mkdir_rc = system(mkdir_cmd.c_str());
+                if (mkdir_rc != 0) {
+                    std::cerr << "[ConfigRunner] Warning: mkdir failed (code " << mkdir_rc << ")" << std::endl;
+                }
             }
 
             SimpleYAML::Config test_cfg = cfg;
@@ -772,6 +836,7 @@ int main(int argc, char** argv) {
 
     std::cout << "[ConfigRunner] Loading configuration from: " << config_file << std::endl;
     auto cfg = SimpleYAML::parse(config_file);
+    temp_dir = determine_temp_dir(cfg.python_bin);
 
     if (cfg.use_jmeter) {
         std::cout << "[ConfigRunner] Using JMeter mode" << std::endl;

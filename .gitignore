@@ -12,6 +12,8 @@ build/
 cplusplus/
 
 my_cpp/build/
+my_cpp/build-wsl/
+my_cpp/build-win/
 apache-jmeter-5.6.3/
 spice_cache/
 SPICE-1.0/

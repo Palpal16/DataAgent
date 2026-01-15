@@ -24,6 +24,13 @@ data_path: null
 visualization_goal: null
 
 # ================================================================================
+# PYTHON
+# ================================================================================
+
+# Python executable used by the C++ config runner
+#python_bin: "/mnt/c/Users/Recup/Documents/Polimi/PACS/DataAgent/.venv/Scripts/python.exe"
+python_bin: "python"
+# ================================================================================
 # MODEL CONFIGURATION
 # ================================================================================
 

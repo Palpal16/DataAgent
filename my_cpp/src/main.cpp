@@ -211,7 +211,7 @@ void print_map(const std::unordered_map<K, const std::vector<std::string>*> &m, 
 }
 
 // Pretty-print a Table (like a simple dataframe preview) to stderr
-static void print_table(const Table &t, const std::string &name, size_t max_rows) {
+[[maybe_unused]] static void print_table(const Table &t, const std::string &name, size_t max_rows) {
     std::cerr << name << " (rows: " << t.rows.size() << ", cols: " << t.columns.size() << ")\n";
     std::cerr << "columns: [";
     for (size_t i = 0; i < t.columns.size(); ++i) {
@@ -280,6 +280,7 @@ static std::multiset<std::string> union_multiset(const std::multiset<std::string
 }
 
 static DiffSummary compare_tables_multiset(const Table &a, const Table &b, const Options &opt) {
+    (void)opt;
     auto start = std::chrono::steady_clock::now();
     DiffSummary s;
     s.row_count_actual = a.rows.size();
@@ -358,7 +359,8 @@ static DiffSummary compare_tables_multiset(const Table &a, const Table &b, const
 // - Validate column set equality (schema)
 // - With keys: align rows by key, then compare values
 // - Without keys: compare rows positionally (order-sensitive)
-static DiffSummary compare_tables(const Table &a, const Table &b, const Options &opt) {
+[[maybe_unused]] static DiffSummary compare_tables(const Table &a, const Table &b, const Options &opt) {
+    (void)opt;
     auto start = std::chrono::steady_clock::now();
     DiffSummary s;
     s.row_count_actual = a.rows.size();
