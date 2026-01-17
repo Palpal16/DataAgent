@@ -159,35 +159,56 @@ You should see spans named: `AgentRun`, `tool_choice`, `sql_query_exec`, `data_a
 - Make sure dependencies are installed: `phoenix`, `openinference-instrumentation-langchain`, `opentelemetry-api`.
 - For Cloud, ensure `phoenix_api_key` is set and valid.
 
-### From the command line
+### From the config runner
+Edit `config/agent_config.yaml`, then run the config runner:
 ```powershell
-python -m Agent.data_agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
+# Windows (PowerShell)
+.\my_cpp\build\agent_config_runner.exe config\agent_config.yaml
+
+# Linux/macOS
+./my_cpp/build/agent_config_runner config/agent_config.yaml
 ```
 
-You can override the parquet path:
-```powershell
-python -m Agent.data_agent "Top products by revenue" --data "C:\path\to\your.parquet"
+Basic example (prompt + visualization goal):
+```yaml
+prompt: "Show me the sales in Nov 2021"
+visualization_goal: "Sales trend for Nov 2021"
+agent_mode: "full"
+save_dir: ./output
 ```
 
-### Save the lookup result to CSV (no analysis, no visualization)
-```powershell
-python -m Agent.data_agent "What were the sales in November 2021?" --lookup-only --output-csv "results/sales_november_2021.csv"
+Override the parquet path:
+```yaml
+data_path: "C:/path/to/your.parquet"
 ```
 
-### Best-of-N self-consistency for SQL generation (lookup only)
-Runs the lookup \(N\) times with a temperature schedule and saves only the best attempt.
-```powershell
-python -m Agent.data_agent "What were the sales in November 2021?" --lookup-only `
-  --best-of-n 5 --best-of-n-temp-min 0.0 --best-of-n-temp-max 0.6 `
-  --output-csv "results/sales_november_2021.csv"
+Save the lookup result to CSV (no analysis, no visualization):
+```yaml
+prompt: "What were the sales in November 2021?"
+agent_mode: "lookup_only"
+save_dir: ./results/sales_november_2021
+```
+The CSV will be written to `run_data.csv` inside `save_dir`.
+
+Best-of-N self-consistency for SQL generation (lookup only):
+```yaml
+prompt: "What were the sales in November 2021?"
+agent_mode: "lookup_only"
+best_of_n: 5
+temperature: 0.0
+temperature_max: 0.6
+save_dir: ./results/sales_november_2021
 ```
 
-### Compare generated CSV vs a ground-truth CSV (IoU metrics)
-This uses a lightweight Python comparator (column/row/data IoU).
-```powershell
-python -m Agent.data_agent "What were the sales in November 2021?" --lookup-only `
-  --output-csv "results/sales_november_2021.csv" `
-  --expected-csv "results/real_sales_november_2021.csv"
+Compare generated CSV vs a ground-truth CSV (IoU metrics):
+```yaml
+prompt: "What were the sales in November 2021?"
+agent_mode: "lookup_only"
+save_dir: ./results/sales_november_2021
+gt_csv: "./results/real_sales_november_2021.csv"
+enable_csv_eval: true
+csv_eval_method: "python"
+csv_iou_type: "rows"
 ```
 ---
 
@@ -202,24 +223,16 @@ cd ..
 ```
 
 Run the agent and compare the produced CSV with an expected CSV (C++ comparator):
-```powershell
-python -m Agent.data_agent "Weekly sales in 2021" `
-  --lookup-only `
-  --output-csv "results/weekly_sales_2021.csv" `
-  --expected-csv "C:\path\to\expected.csv" `
-  --evaluator-exe ".\my_cpp\build\resultcmp.exe" `
-  --eval-keys "week,store_id"
-```
-
-PowerShell example with backtick continuations:
-```powershell
-python -m Agent.data_agent "Weekly sales in 2021" `
-  --lookup-only `
-  --model "llama3.2:3b" `
-  --output-csv "results/weekly_sales_2021.csv" `
-  --expected-csv "C:\path\to\expected.csv" `
-  --evaluator-exe ".\my_cpp\build\resultcmp.exe" `
-  --eval-keys "week,store_id"
+```yaml
+prompt: "Weekly sales in 2021"
+agent_mode: "lookup_only"
+save_dir: ./results/weekly_sales_2021
+gt_csv: "C:/path/to/expected.csv"
+enable_csv_eval: true
+csv_eval_method: "cpp"
+cpp_evaluator:
+  executable: "./my_cpp/build/resultcmp.exe"
+  keys: "week,store_id"
 ```
 
 The final returned dict will include an `evaluation` field like:
@@ -365,13 +378,17 @@ SPICE is a **semantic scene-graph** metric originally designed for **image capti
 - **Java** installed (`java -version`)
 - A SPICE jar file (e.g., `spice-1.0.jar`) downloaded from the official repo(https://panderson.me/spice/).
 
-### CLI example (analyze-only + SPICE)
-```powershell
-python -m Agent.data_agent "What were the sum of sales in November 2021?" `
-  --analyze-only `
-  --expected-analysis-file "results/expected_analysis.txt" `
-  --analysis-metric spice `
-  --spice-jar "spice/spice-1.0.jar"
+### Config runner example (analysis + SPICE)
+```yaml
+prompt: "What were the sum of sales in November 2021?"
+agent_mode: "analysis"
+save_dir: ./output
+gt_text: "./results/expected_analysis.txt"
+enable_text_eval: true
+text_eval_method: "spice"
+spice:
+  jar_path: "spice/spice-1.0.jar"
+  java_bin: "java"
 ```
 
 ### API example (SPICE)

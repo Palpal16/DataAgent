@@ -9,19 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from Agent.utils import compare_csv, bleu_score, run_cpp_comparator
+from Agent.utils import compare_csv, bleu_score, run_cpp_comparator, prepare_gt_from_dataset
 
 
 def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def find_case_by_prompt(cases, prompt: str):
-    for case in cases:
-        if case.get("prompt") == prompt:
-            return case
-    return None
 
 
 def win_to_wsl(path: Path) -> str:
@@ -128,23 +121,27 @@ def main():
     prompt = result.get("prompt", "")
     answer_text = " ".join(result.get("answer", []))
 
-    cases = load_json(dataset_path)
-    case = find_case_by_prompt(cases, prompt)
-    if not case:
-        raise SystemExit("Prompt not found in dataset JSON")
-
-    gt_data = case.get("gt_data", "")
-    if not gt_data:
-        raise SystemExit("gt_data is missing for this prompt")
     output_dir.mkdir(parents=True, exist_ok=True)
-    gt_csv_path.write_text(gt_data, encoding="utf-8")
+    try:
+        prep = prepare_gt_from_dataset(
+            prompt=prompt,
+            dataset_path=str(dataset_path),
+            output_dir=str(output_dir),
+            gt_csv_filename=args.write_gt_csv,
+            gt_results_filename="gt_results.json",
+            gt_text_filename="gt_analysis.txt",
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    case = prep["case"]
+    gt_csv_path = Path(prep["gt_csv_path"])
 
     cols_iou, rows_iou, data_iou = compare_csv(str(run_csv_path), str(gt_csv_path))
     summary = {
         "csv_iou": {"columns": cols_iou, "rows": rows_iou, "table": data_iou},
     }
 
-    gt_analysis = case.get("gt_analysis", "")
+    gt_analysis = case.get("gt_analysis", "") if case else ""
     if gt_analysis:
         summary["bleu"] = bleu_score(answer_text, gt_analysis)
     else:

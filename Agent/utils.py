@@ -45,6 +45,69 @@ def save_csv(rows: List[List[str]], filepath: str):
         writer = csv.writer(f)
         writer.writerows(rows)
 
+def find_case_by_prompt(cases: List[dict], prompt: str) -> Optional[dict]:
+    for case in cases:
+        if case.get("prompt") == prompt:
+            return case
+    return None
+
+def prepare_gt_from_dataset(
+    *,
+    prompt: str,
+    dataset_path: str,
+    output_dir: str,
+    gt_csv_filename: str = "gt_data.csv",
+    gt_results_filename: str = "gt_results.json",
+    gt_text_filename: str = "gt_analysis.txt",
+) -> Dict[str, Optional[str]]:
+    """Generate gt CSV/results files from dataset JSON for a prompt.
+
+    Returns paths for gt_csv, gt_text (if available), and gt_results, plus the matched case.
+    """
+    with open(dataset_path, "r", encoding="utf-8") as f:
+        cases = json.load(f)
+    case = find_case_by_prompt(cases, prompt)
+    if not case:
+        raise ValueError("Prompt not found in dataset JSON")
+
+    gt_data = case.get("gt_data", "")
+    if not gt_data:
+        raise ValueError("gt_data is missing for this prompt")
+
+    os.makedirs(output_dir, exist_ok=True)
+    gt_csv_path = os.path.join(output_dir, gt_csv_filename)
+    gt_results_path = os.path.join(output_dir, gt_results_filename)
+    gt_text_path = None
+
+    gt_rows = text_to_csv(gt_data)
+    if gt_rows:
+        save_csv(gt_rows, gt_csv_path)
+    else:
+        with open(gt_csv_path, "w", encoding="utf-8") as f:
+            f.write(gt_data)
+
+    gt_results = {
+        "prompt": case.get("prompt", ""),
+        "gt_sql": case.get("gt_sql", ""),
+        "gt_data": case.get("gt_data", ""),
+        "gt_analysis": case.get("gt_analysis", ""),
+    }
+    with open(gt_results_path, "w", encoding="utf-8") as f:
+        json.dump(gt_results, f, indent=2)
+
+    gt_analysis = case.get("gt_analysis", "")
+    if gt_analysis:
+        gt_text_path = os.path.join(output_dir, gt_text_filename)
+        with open(gt_text_path, "w", encoding="utf-8") as f:
+            f.write(gt_analysis)
+
+    return {
+        "gt_csv_path": gt_csv_path,
+        "gt_text_path": gt_text_path,
+        "gt_results_path": gt_results_path,
+        "case": case,
+    }
+
 def get_evaluation_functions(
     *,
     lookup_only: bool = False,
@@ -54,6 +117,9 @@ def get_evaluation_functions(
     cpp_csv_eval: bool = False,
     evaluator_exe: Optional[str] = None,
     eval_keys: Optional[str] = None,
+    evaluator_threads: int = 0,
+    evaluator_benchmark: bool = False,
+    evaluator_benchmark_iters: int = 3,
     iou_type: str = "rows",
     # Text evaluation options
     gt_text_path: Optional[str] = None,
@@ -114,13 +180,18 @@ def get_evaluation_functions(
                         actual_csv=csv_path, 
                         evaluator_exe=evaluator_exe, 
                         expected_csv=gt_csv_path, 
-                        keys=keys
+                        keys=keys,
+                        threads=evaluator_threads,
+                        benchmark=evaluator_benchmark,
+                        benchmark_iters=evaluator_benchmark_iters,
                     )
                     iou_type_map = {"columns": "columns_iou", "rows": "rows_iou", "table": "iou"}
-                    return output.get(iou_type_map.get(iou_type,"rows_iou"),0.0)
+                    metric_key = iou_type_map.get(iou_type, "rows_iou")
+                    score = float(output.get(metric_key, 0.0) or 0.0)
+                    return {"score": score, "metric_key": metric_key, "report": output}
                 except Exception as e:
                     print(f"[CSV Eval] C++ comparator failed: {e}")
-                    return 0.0
+                    return {"score": 0.0, "error": str(e)}
             csv_eval_fn = cpp_wrapper
 
     # Load ground truth if provided
@@ -133,32 +204,62 @@ def get_evaluation_functions(
             gt_text = None
 
     if not lookup_only:
-        if spice_text_eval and gt_text_path and gt_text:
-            try:
-                check_spice_jar_runnable(spice_jar=spice_jar, java_bin=spice_java_bin)
-            except Exception as e:
-                print(json.dumps({"error": f"SPICE precheck failed: {str(e)}"}, indent=2)) #TODO make into warning
-            
-            text_eval_fn = partial(spice_score_java, reference=gt_text, spice_jar=spice_jar, java_bin=spice_java_bin)
-            
-        elif bleu_text_eval and gt_text_path and gt_text:
-            if bleu_nltk:
-                text_eval_fn = partial(bleu_score_nltk,reference=gt_text, max_n=4, smooth=True)
-            else:  # simple
-                text_eval_fn = partial(bleu_score,reference=gt_text, max_n=4, smooth=True)
-                
-        elif llm_text_eval and llm_judge_model:
-            def text_eval_llm(generated_text: str, prompt:str, sql_query:str, data:str) -> float:
+        # LLM judge is treated as mutually exclusive with other text metrics
+        if llm_text_eval and llm_judge_model:
+            def text_eval_llm(generated_text: str, prompt: str, sql_query: str, data: str) -> float:
                 score, _ = judge_analysis(
-                        prompt=prompt,
-                        sql_query=sql_query,
-                        data=data,
-                        analysis=generated_text,
-                        judge_model=llm_judge_model,
-                        ollama_url=ollama_url
-                    )
+                    prompt=prompt,
+                    sql_query=sql_query,
+                    data=data,
+                    analysis=generated_text,
+                    judge_model=llm_judge_model,
+                    ollama_url=ollama_url,
+                )
                 return score
+
             text_eval_fn = text_eval_llm
+
+        else:
+            # Metric-based evaluation: allow BLEU and SPICE together.
+            if (bleu_text_eval or spice_text_eval) and (not gt_text_path or not gt_text):
+                print("Text evaluation requested but gt_text is missing/empty.")
+
+            bleu_fn = None
+            spice_fn = None
+
+            if bleu_text_eval and gt_text:
+                if bleu_nltk:
+                    bleu_fn = partial(bleu_score_nltk, reference=gt_text, max_n=4, smooth=True)
+                else:
+                    bleu_fn = partial(bleu_score, reference=gt_text, max_n=4, smooth=True)
+
+            if spice_text_eval and gt_text:
+                # If the jar wasn't provided, try common local locations.
+                if not spice_jar:
+                    candidates = [
+                        os.path.join(os.getcwd(), "SPICE-1.0", "spice-1.0.jar"),
+                        os.path.join(os.getcwd(), "spice", "spice-1.0.jar"),
+                        os.path.join(os.path.dirname(os.path.dirname(__file__)), "SPICE-1.0", "spice-1.0.jar"),
+                        os.path.join(os.path.dirname(os.path.dirname(__file__)), "spice", "spice-1.0.jar"),
+                    ]
+                    for p in candidates:
+                        if os.path.exists(p):
+                            spice_jar = p
+                            break
+                # SPICE requires a runnable jar
+                check_spice_jar_runnable(spice_jar=spice_jar, java_bin=spice_java_bin)
+                spice_fn = partial(spice_score_java, reference=gt_text, spice_jar=spice_jar, java_bin=spice_java_bin)
+
+            if bleu_fn and spice_fn:
+                def text_eval_both(generated_text: str) -> Dict[str, float]:
+                    return {
+                        "bleu": float(bleu_fn(generated_text)),
+                        "spice": float(spice_fn(generated_text)),
+                    }
+                text_eval_fn = text_eval_both
+            else:
+                # Single-metric case
+                text_eval_fn = bleu_fn or spice_fn
     
     return csv_eval_fn, text_eval_fn
 
@@ -213,6 +314,9 @@ def run_cpp_comparator(
     actual_csv: str,
     expected_csv: str,
     keys: Optional[List[str]] = None,
+    threads: int = 0,
+    benchmark: bool = False,
+    benchmark_iters: int = 3,
     case_insensitive: bool = False,
     stream_debug: bool = False,
 ) -> Dict:
@@ -221,6 +325,10 @@ def run_cpp_comparator(
         args += ["--key", ",".join(keys)]
     if case_insensitive:
         args += ["--case-insensitive"]
+    if threads and int(threads) > 0:
+        args += ["--threads", str(int(threads))]
+    if benchmark:
+        args += ["--benchmark", "--benchmark-iters", str(max(1, int(benchmark_iters)))]
 
     # If stream_debug is True, inherit stderr so C++ debug (sent to stderr) prints to terminal.
     # Keep stdout captured to parse JSON report.

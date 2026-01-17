@@ -3,7 +3,7 @@ from flask import Flask, request, jsonify
 import os
 import tempfile
 from Agent.data_agent import SalesDataAgent
-from Agent.utils import get_evaluation_functions
+from Agent.utils import get_evaluation_functions, prepare_gt_from_dataset
 
 app = Flask(__name__)
 
@@ -30,6 +30,7 @@ def call_agent():
         "enable_codecarbon": false,  # Optional
 
         # Ground truth for evaluation
+        "dataset": "/path/to/dataset.json",  # Optional (auto-generate gt files)
         "gt_csv": "/path/to/ground_truth.csv",  # Optional
         "gt_text": "/path/to/ground_truth.txt",  # Optional
 
@@ -84,6 +85,7 @@ def call_agent():
         save_dir = tempfile.mkdtemp(prefix="api_agent_runs_")
 
     # Ground truth paths
+    dataset_path = payload.get("dataset") or payload.get("dataset_path")
     gt_csv = payload.get("gt_csv") or payload.get("gt-csv")
     gt_text_path = payload.get("gt_text") or payload.get("gt-text")
 
@@ -109,6 +111,24 @@ def call_agent():
 
     # CodeCarbon option
     enable_codecarbon = bool(payload.get("enable_codecarbon") or payload.get("enable-codecarbon", False))
+
+    # Auto-generate gt files from dataset if provided
+    if dataset_path:
+        try:
+            prep = prepare_gt_from_dataset(
+                prompt=prompt,
+                dataset_path=dataset_path,
+                output_dir=save_dir,
+                gt_csv_filename="gt_data.csv",
+                gt_results_filename="gt_results.json",
+                gt_text_filename="gt_analysis.txt",
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if not gt_csv:
+            gt_csv = prep["gt_csv_path"]
+        if not gt_text_path and prep.get("gt_text_path"):
+            gt_text_path = prep["gt_text_path"]
 
     # Create agent (use global or create new one with custom params)
     req_agent = agent

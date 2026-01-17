@@ -16,6 +16,13 @@
 #include <vector>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
+
+#include "util.hpp"
+
+#if defined(RESULTCMP_HAS_OPENMP)
+#include <omp.h>
+#endif
 
 // Command-line options controlling comparison behavior
 struct Options {
@@ -24,7 +31,21 @@ struct Options {
     std::vector<std::string> keys; // join keys for order-insensitive compare
     bool json = true;
     bool case_insensitive = false;
+    bool debug = false;
+    int threads = 0; // 0 = default
+    bool benchmark = false;
+    int benchmark_iters = 3;
 };
+
+static void maybe_set_threads(const Options& opt) {
+#if defined(RESULTCMP_HAS_OPENMP)
+    if (opt.threads > 0) {
+        omp_set_num_threads(opt.threads);
+    }
+#else
+    (void)opt;
+#endif
+}
 
 // Numeric comparison tolerances (constants)
 static constexpr double FLOAT_ABS_TOLERANCE = 1e-8;
@@ -101,14 +122,27 @@ static std::vector<std::string> split_csv_line(const std::string &line) {
     }
     // Always push the final field (may be empty when line ends with a comma)
     out.push_back(cur);
+    // Trim whitespace/CR from fields (important for Windows CRLF files)
+    for (auto &f : out) f = trim(f);
     return out;
 }
 
-// Helper: split a CSV line and drop the first field (used to skip index columns)
-static std::vector<std::string> split_csv_line_skip_first(const std::string &line) {
-    std::vector<std::string> out = split_csv_line(line);
-    if (!out.empty()) out.erase(out.begin());
-    return out;
+static inline bool looks_like_index_header(const std::string& h) {
+    const auto lh = lower_copy(trim(h));
+    return lh.empty() || lh == "unnamed: 0" || lh == "index";
+}
+
+static inline bool looks_like_index_value(const std::string& v) {
+    // Heuristic: common pandas index is an integer like 0,1,2,...
+    std::string s = trim(v);
+    if (s.empty()) return false;
+    // allow leading +/-
+    size_t i = (s[0] == '+' || s[0] == '-') ? 1 : 0;
+    if (i >= s.size()) return false;
+    for (; i < s.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(s[i]))) return false;
+    }
+    return true;
 }
 
 // Parsed CSV in memory
@@ -124,14 +158,35 @@ static bool read_csv(const std::string &path, Table &t, std::string &err) {
     if (!f.is_open()) { err = "Cannot open file: " + path; return false; }
     std::string line;
     if (!std::getline(f, line)) { err = "Empty file: " + path; return false; }
-    // Parse header and skip first field (index)
-    t.columns = split_csv_line(line);
-    if (t.columns.empty()) { err = "Malformed header in file: " + path; return false; }
+    // Parse header. Some pandas CSVs include an index column (often "Unnamed: 0").
+    auto header = split_csv_line(line);
+    if (header.empty()) { err = "Malformed header in file: " + path; return false; }
+
+    // If header explicitly includes an index column, drop it from both header + rows.
+    bool drop_index_header = looks_like_index_header(header.front());
+    if (drop_index_header) header.erase(header.begin());
+    t.columns = std::move(header);
+
     t.col_index.clear();
     for (size_t i = 0; i < t.columns.size(); ++i) t.col_index[t.columns[i]] = i;
+
+    // Some CSVs don't have an index in the header, but do include it in rows (e.g., pandas.to_csv with index=True).
+    // Detect this using the first data row.
+    bool drop_index_rows = drop_index_header;
+    std::string first_data_line;
+    if (std::getline(f, first_data_line)) {
+        auto parts = split_csv_line(first_data_line);
+        if (!drop_index_rows && parts.size() == t.columns.size() + 1 && looks_like_index_value(parts.front())) {
+            drop_index_rows = true;
+        }
+        if (drop_index_rows && !parts.empty()) parts.erase(parts.begin());
+        parts.resize(t.columns.size());
+        t.rows.push_back(std::move(parts));
+    }
+
     while (std::getline(f, line)) {
-        auto parts = split_csv_line_skip_first(line);
-        // pad/truncate to header size
+        auto parts = split_csv_line(line);
+        if (drop_index_rows && !parts.empty()) parts.erase(parts.begin());
         parts.resize(t.columns.size());
         t.rows.push_back(std::move(parts));
     }
@@ -139,7 +194,7 @@ static bool read_csv(const std::string &path, Table &t, std::string &err) {
 }
 
 // Build composite key from selected columns in a row
-static std::string make_key(const std::vector<std::string> &keys, const Table &t, const std::vector<std::string> &row) {
+static std::string make_key(const std::vector<std::string> &keys, const Table &t, const std::vector<std::string> &row, const Options &opt) {
     if (keys.empty()) return {};
     std::ostringstream oss;
     oss << "(";
@@ -152,7 +207,7 @@ static std::string make_key(const std::vector<std::string> &keys, const Table &t
         first = false;
     }
     oss << ")";
-    std::cerr << "Key: " << oss.str() << std::endl;
+    if (opt.debug) std::cerr << "Key: " << oss.str() << std::endl;
     return oss.str();
 }
 
@@ -177,6 +232,14 @@ struct DiffSummary {
     size_t rows_set_b_size = 0;
     size_t rows_intersection_size = 0;
     size_t rows_union_size = 0;
+
+    // Optional benchmark (serial vs OpenMP)
+    bool benchmark_ran = false;
+    long long benchmark_serial_ms = 0;
+    long long benchmark_parallel_ms = 0;
+    int benchmark_serial_threads = 1;
+    int benchmark_parallel_threads = 0;
+    int benchmark_iters = 0;
 };
 
 template <typename K, typename V>
@@ -280,7 +343,7 @@ static std::multiset<std::string> union_multiset(const std::multiset<std::string
 }
 
 static DiffSummary compare_tables_multiset(const Table &a, const Table &b, const Options &opt) {
-    (void)opt;
+    maybe_set_threads(opt);
     auto start = std::chrono::steady_clock::now();
     DiffSummary s;
     s.row_count_actual = a.rows.size();
@@ -292,56 +355,60 @@ static DiffSummary compare_tables_multiset(const Table &a, const Table &b, const
     std::multiset<std::string> cols_intersection = intersection_multiset(cols_a, cols_b);
     // Just rename cols_intersection to common_cols for clarity
     std::vector<std::string> common_cols(cols_intersection.begin(), cols_intersection.end());
-    std::cerr << "Common columns: " << std::endl;
-    for (const auto &c : common_cols) std::cerr << c << std::endl;
+    if (opt.debug) {
+        std::cerr << "Common columns:\n";
+        for (const auto &c : common_cols) std::cerr << c << "\n";
+    }
     std::multiset<std::string> cols_union = union_multiset(cols_a, cols_b);
     s.columns_iou = !cols_union.empty()
         ? static_cast<double>(cols_intersection.size()) / static_cast<double>(cols_union.size())
         : 0.0;
-    // Print cols a and b in the same line, comma separated
-    std::cerr << "Cols A: ";
-    for (auto it = cols_a.begin(); it != cols_a.end(); ++it) {
-        if (it != cols_a.begin()) std::cerr << ",";
-        std::cerr << *it;
+    if (opt.debug) {
+        std::cerr << "columns_iou=" << s.columns_iou << "\n";
     }
-    std::cerr << std::endl;
-
-    std::cerr << "Cols B: ";
-    for (auto it = cols_b.begin(); it != cols_b.end(); ++it) {
-        if (it != cols_b.begin()) std::cerr << ",";
-        std::cerr << *it;
-    }
-    std::cerr << std::endl;
-
-    std::cerr << "Cols Intersection: ";
-    for (auto it = cols_intersection.begin(); it != cols_intersection.end(); ++it) {
-        if (it != cols_intersection.begin()) std::cerr << ",";
-        std::cerr << *it;
-    }
-    std::cerr << std::endl;
-
-    std::cerr << "Cols Union: ";
-    for (auto it = cols_union.begin(); it != cols_union.end(); ++it) {
-        if (it != cols_union.begin()) std::cerr << ",";
-        std::cerr << *it;
-    }
-    std::cerr << std::endl;
     // 2) Rows IoU computed on the intersection of columns:
     //    - Build a canonical string key per row using only common columns (trimmed; optional lowercase)
     //    - Compare sets of unique row keys across the two tables
     if (!common_cols.empty()) {
-        std::multiset<std::string> set_a;
-        std::multiset<std::string> set_b;
-        std::cerr << "Set A: " << std::endl;
-        for (const auto &ra : a.rows) set_a.insert(make_key(common_cols, a, ra));
-        for (const auto &rb : b.rows) set_b.insert(make_key(common_cols, b, rb));
-        std::cerr << "Set B: " << std::endl;
-        for (const auto &rb : set_b) std::cerr << rb << std::endl;
-        std::multiset<std::string> rows_intersection = intersection_multiset(set_a, set_b);
-        std::multiset<std::string> rows_union = union_multiset(set_a, set_b);
-        s.rows_intersection_size = rows_intersection.size();
-        s.rows_union_size = rows_union.size();
-        s.rows_iou = (rows_union.size() > 0) ? static_cast<double>(rows_intersection.size()) / static_cast<double>(rows_union.size()) : 0.0;
+        // Build row keys (dominant cost). Parallelized when OpenMP is available.
+        std::vector<std::string> keys_a(a.rows.size());
+        std::vector<std::string> keys_b(b.rows.size());
+
+#if defined(RESULTCMP_HAS_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+        for (int i = 0; i < static_cast<int>(a.rows.size()); ++i) {
+            keys_a[static_cast<size_t>(i)] = make_key(common_cols, a, a.rows[static_cast<size_t>(i)], opt);
+        }
+
+#if defined(RESULTCMP_HAS_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+        for (int i = 0; i < static_cast<int>(b.rows.size()); ++i) {
+            keys_b[static_cast<size_t>(i)] = make_key(common_cols, b, b.rows[static_cast<size_t>(i)], opt);
+        }
+
+        std::sort(keys_a.begin(), keys_a.end());
+        std::sort(keys_b.begin(), keys_b.end());
+        s.rows_set_a_size = keys_a.size();
+        s.rows_set_b_size = keys_b.size();
+
+        // Multiset intersection/union sizes (count duplicates)
+        size_t i = 0, j = 0;
+        size_t inter = 0, uni = 0;
+        while (i < keys_a.size() && j < keys_b.size()) {
+            if (keys_a[i] == keys_b[j]) {
+                inter++; uni++; i++; j++;
+            } else if (keys_a[i] < keys_b[j]) {
+                uni++; i++;
+            } else {
+                uni++; j++;
+            }
+        }
+        uni += (keys_a.size() - i) + (keys_b.size() - j);
+        s.rows_intersection_size = inter;
+        s.rows_union_size = uni;
+        s.rows_iou = (uni > 0) ? static_cast<double>(inter) / static_cast<double>(uni) : 0.0;
     }
 
 
@@ -360,7 +427,7 @@ static DiffSummary compare_tables_multiset(const Table &a, const Table &b, const
 // - With keys: align rows by key, then compare values
 // - Without keys: compare rows positionally (order-sensitive)
 [[maybe_unused]] static DiffSummary compare_tables(const Table &a, const Table &b, const Options &opt) {
-    (void)opt;
+    maybe_set_threads(opt);
     auto start = std::chrono::steady_clock::now();
     DiffSummary s;
     s.row_count_actual = a.rows.size();
@@ -372,8 +439,10 @@ static DiffSummary compare_tables_multiset(const Table &a, const Table &b, const
     std::set<std::string> cols_intersection = intersection_set(cols_a, cols_b);
     // Just rename cols_intersection to common_cols for clarity
     std::vector<std::string> common_cols(cols_intersection.begin(), cols_intersection.end());
-    std::cerr << "Common columns: " << std::endl;
-    for (const auto &c : common_cols) std::cerr << c << std::endl;
+    if (opt.debug) {
+        std::cerr << "Common columns:\n";
+        for (const auto &c : common_cols) std::cerr << c << "\n";
+    }
 
     std::set<std::string> cols_union = union_set(cols_a, cols_b);
     s.columns_iou = !cols_union.empty()
@@ -384,18 +453,42 @@ static DiffSummary compare_tables_multiset(const Table &a, const Table &b, const
     //    - Build a canonical string key per row using only common columns (trimmed; optional lowercase)
     //    - Compare sets of unique row keys across the two tables
     if (!common_cols.empty()) {
-        std::set<std::string> set_a;
-        std::set<std::string> set_b;
-        std::cerr << "Set A: " << std::endl;
-        for (const auto &ra : a.rows) set_a.insert(make_key(common_cols, a, ra));
-        for (const auto &rb : b.rows) set_b.insert(make_key(common_cols, b, rb));
-        std::cerr << "Set B: " << std::endl;
-        for (const auto &rb : set_b) std::cerr << rb << std::endl;
-        std::set<std::string> rows_intersection = intersection_set(set_a, set_b);
-        std::set<std::string> rows_union = union_set(set_a, set_b);
-        s.rows_intersection_size = rows_intersection.size();
-        s.rows_union_size = rows_union.size();
-        s.rows_iou = (rows_union.size() > 0) ? static_cast<double>(rows_intersection.size()) / static_cast<double>(rows_union.size()) : 0.0;
+        std::vector<std::string> keys_a(a.rows.size());
+        std::vector<std::string> keys_b(b.rows.size());
+
+#if defined(RESULTCMP_HAS_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+        for (int i = 0; i < static_cast<int>(a.rows.size()); ++i) {
+            keys_a[static_cast<size_t>(i)] = make_key(common_cols, a, a.rows[static_cast<size_t>(i)], opt);
+        }
+
+#if defined(RESULTCMP_HAS_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+        for (int i = 0; i < static_cast<int>(b.rows.size()); ++i) {
+            keys_b[static_cast<size_t>(i)] = make_key(common_cols, b, b.rows[static_cast<size_t>(i)], opt);
+        }
+
+        std::sort(keys_a.begin(), keys_a.end());
+        keys_a.erase(std::unique(keys_a.begin(), keys_a.end()), keys_a.end());
+        std::sort(keys_b.begin(), keys_b.end());
+        keys_b.erase(std::unique(keys_b.begin(), keys_b.end()), keys_b.end());
+        s.rows_set_a_size = keys_a.size();
+        s.rows_set_b_size = keys_b.size();
+
+        // Set intersection/union sizes
+        size_t i = 0, j = 0;
+        size_t inter = 0;
+        while (i < keys_a.size() && j < keys_b.size()) {
+            if (keys_a[i] == keys_b[j]) { inter++; i++; j++; }
+            else if (keys_a[i] < keys_b[j]) i++;
+            else j++;
+        }
+        const size_t uni = keys_a.size() + keys_b.size() - inter;
+        s.rows_intersection_size = inter;
+        s.rows_union_size = uni;
+        s.rows_iou = (uni > 0) ? static_cast<double>(inter) / static_cast<double>(uni) : 0.0;
     }
 
 
@@ -433,17 +526,32 @@ static void print_json(const DiffSummary &s) {
     std::cout << "    \"union\": " << s.rows_union_size << "\n";
     std::cout << "  },\n";
     std::cout << "  \"duration_ms\": " << s.duration_ms;
+
     if (!s.error.empty()) {
-        std::cout << ",\n  \"error\": \"" << s.error << "\"\n";
-    } else {
-        std::cout << "\n";
+        std::cout << ",\n  \"error\": \"" << s.error << "\"";
+    }
+    if (s.benchmark_ran) {
+        std::cout << ",\n  \"benchmark\": {\n";
+#if defined(RESULTCMP_HAS_OPENMP)
+        std::cout << "    \"openmp\": true,\n";
+#else
+        std::cout << "    \"openmp\": false,\n";
+#endif
+        std::cout << "    \"iters\": " << s.benchmark_iters << ",\n";
+        std::cout << "    \"serial\": {\"threads\": " << s.benchmark_serial_threads << ", \"ms\": " << s.benchmark_serial_ms << "},\n";
+        std::cout << "    \"parallel\": {\"threads\": " << s.benchmark_parallel_threads << ", \"ms\": " << s.benchmark_parallel_ms << "},\n";
+        const double speedup = (s.benchmark_parallel_ms > 0)
+            ? (static_cast<double>(s.benchmark_serial_ms) / static_cast<double>(s.benchmark_parallel_ms))
+            : 0.0;
+        std::cout << "    \"speedup\": " << speedup << "\n";
+        std::cout << "  }\n";
     }
     std::cout << "}\n";
 }
 
 // Print CLI usage to stderr
 static void print_usage() {
-    std::cerr << "Usage: resultcmp --actual A.csv --expected E.csv [--key k1,k2] [--case-insensitive]\n";
+    std::cerr << "Usage: resultcmp --actual A.csv --expected E.csv [--key k1,k2] [--case-insensitive] [--debug] [--threads N] [--benchmark] [--benchmark-iters K]\n";
 }
 
 // CLI entrypoint:
@@ -465,6 +573,10 @@ int main(int argc, char **argv) {
             while (std::getline(ss, item, ',')) opt.keys.push_back(item);
         }
         else if (arg == "--case-insensitive") opt.case_insensitive = true;
+        else if (arg == "--debug") opt.debug = true;
+        else if (arg == "--threads") opt.threads = std::stoi(next());
+        else if (arg == "--benchmark") opt.benchmark = true;
+        else if (arg == "--benchmark-iters") opt.benchmark_iters = std::max(1, std::stoi(next()));
         else if (arg == "--help" || arg == "-h") { print_usage(); return 0; }
         else { std::cerr << "Unknown arg: " << arg << "\n"; print_usage(); return 2; }
     }
@@ -478,7 +590,50 @@ int main(int argc, char **argv) {
     if (!read_csv(opt.expected_path, te, err)) {
         DiffSummary s; s.error = err; print_json(s); return 2;
     }
+
     auto summary = compare_tables_multiset(ta, te, opt);
+
+    if (opt.benchmark) {
+        // Benchmark comparison only (CSV already loaded). We run multiple iterations and take the minimum
+        // to reduce noise from scheduling/CPU frequency changes.
+        const int iters = std::max(1, opt.benchmark_iters);
+
+        Options serial_opt = opt;
+        serial_opt.debug = false;
+        serial_opt.threads = 1;
+
+        Options par_opt = opt;
+        par_opt.debug = false;
+#if defined(RESULTCMP_HAS_OPENMP)
+        if (par_opt.threads <= 0) {
+            par_opt.threads = omp_get_max_threads();
+        }
+#else
+        par_opt.threads = 1;
+#endif
+
+        // Warm-up (avoid first-run effects like allocation/caches)
+        (void)compare_tables_multiset(ta, te, serial_opt);
+        (void)compare_tables_multiset(ta, te, par_opt);
+
+        const long long best_serial = util::measure_min_ms(iters, [&] {
+            (void)compare_tables_multiset(ta, te, serial_opt);
+        });
+        const long long best_parallel = util::measure_min_ms(iters, [&] {
+            (void)compare_tables_multiset(ta, te, par_opt);
+        });
+
+        summary.benchmark_ran = true;
+        summary.benchmark_iters = iters;
+        summary.benchmark_serial_threads = 1;
+        summary.benchmark_parallel_threads = par_opt.threads;
+        summary.benchmark_serial_ms = best_serial;
+        summary.benchmark_parallel_ms = best_parallel;
+        // If the dataset is tiny, millisecond resolution may be 0; fall back to at least 1ms for speedup readability.
+        if (summary.benchmark_serial_ms == 0) summary.benchmark_serial_ms = 1;
+        if (summary.benchmark_parallel_ms == 0) summary.benchmark_parallel_ms = 1;
+    }
+
     print_json(summary);
     return summary.equal ? 0 : 1;
 }

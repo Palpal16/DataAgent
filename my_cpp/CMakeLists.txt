@@ -6,8 +6,21 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(resultcmp src/main.cpp)
-add_executable(agent_config_runner src/agent_config_runner.cpp)
+add_library(runner_common src/runner_common.cpp)
+target_include_directories(runner_common PUBLIC src)
+
+add_executable(agent_config_runner src/agent_config_runner.cpp src/agent_config_runner_config.cpp)
+target_link_libraries(agent_config_runner PRIVATE runner_common)
+
 add_executable(agent_config_runner_jmeter src/agent_config_runner_jmeter.cpp)
+target_link_libraries(agent_config_runner_jmeter PRIVATE runner_common)
+
+# Optional: OpenMP acceleration for resultcmp (CSV comparator)
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(resultcmp PRIVATE OpenMP::OpenMP_CXX)
+  target_compile_definitions(resultcmp PRIVATE RESULTCMP_HAS_OPENMP=1)
+endif()
 
 # On Windows, set console subsystem explicitly if needed
 if (MSVC)
