@@ -52,6 +52,12 @@ temperature: 0.1
 #   full:        Complete pipeline with visualization code
 agent_mode: "analysis"
 
+# Two-stage reasoning (internal notes -> final output). Notes are not printed/saved.
+two_stage_cot: true
+cot_max_bullets: 8
+cot_print_plan: true
+cot_store_plan: false
+
 # ================================================================================
 # BEST-OF-N SAMPLING
 # ================================================================================
@@ -100,6 +106,9 @@ csv_iou_type: "table"  # Options: rows | columns | table
 cpp_evaluator:
   executable: null  # Path to C++ evaluator binary
   keys: null        # Comma-separated key columns (e.g., "store_id,date")
+  threads: 8        # OpenMP threads for resultcmp (only if csv_eval_method = cpp)
+  benchmark: true   # Run serial vs OpenMP benchmark inside resultcmp
+  benchmark_iters: 10
 
 # ================================================================================
 # TEXT EVALUATION
@@ -109,16 +118,16 @@ cpp_evaluator:
 enable_text_eval: true
 
 # Text evaluation method
-# Options: bleu | spice | llm
-text_eval_method: "bleu"
+# Options: bleu | spice | bleu+spice | llm
+text_eval_method: "bleu+spice"
 
 # BLEU settings
 bleu:
   use_nltk: false  # Use NLTK BLEU instead of simple implementation
 
-# SPICE settings (for text_eval_method = spice)
+# SPICE settings (for text_eval_method = spice or bleu+spice)
 spice:
-  jar_path: null     # Path to SPICE jar file (required for SPICE)
+  jar_path: "C:/Users/Recup/Documents/Polimi/PACS/DataAgent/SPICE-1.0/spice-1.0.jar"     # Path to SPICE jar file (required for SPICE)
   java_bin: "java"   # Java executable path
 
 # LLM Judge settings (for text_eval_method = llm)
@@ -143,6 +152,20 @@ test_cases_json: ./evaluation/our_dataset_test.json
 run_batch: true
 
 # ================================================================================
+# SWEEP (PARAMETER GRID)
+# ================================================================================
+# If enabled, the C++ runner will execute multiple batch runs by varying parameters
+# and append everything into a single CSV:  <save_dir>/sweep_results.csv
+#
+# Values are comma-separated lists. Example: "1,2,3".
+sweep:
+  enabled: true
+  best_of_n: "1" #"1,2,3"
+  temperature: "0.1"
+  temperature_max: "0.1"   # use "null" to disable temp_max
+  repetitions: 1
+
+# ================================================================================
 # TRACING & MONITORING
 # ================================================================================
 
@@ -161,4 +184,4 @@ phoenix:
 # ================================================================================
 
 # Enable CodeCarbon energy/emissions tracking
-enable_codecarbon: false
+enable_codecarbon: true

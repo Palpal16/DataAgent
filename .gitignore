@@ -11,6 +11,7 @@ my_cpp/out/
 build/
 cplusplus/
 
+Report/
 my_cpp/build/
 my_cpp/build-wsl/
 my_cpp/build-win/
@@ -19,6 +20,7 @@ spice_cache/
 SPICE-1.0/
 spice
 tmp/
+
 
 loop.py
 CMakePresets.json

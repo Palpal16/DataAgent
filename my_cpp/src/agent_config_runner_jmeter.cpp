@@ -16,18 +16,16 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <algorithm>
+
+#include "runner_common.hpp"
 
 static pid_t phoenix_pid = 0;
 static pid_t api_pid = 0;
 static std::string temp_dir = "/tmp";
 
 static std::string determine_temp_dir(const std::string& python_bin) {
-    if (!python_bin.empty()) {
-        if (python_bin.find(".exe") != std::string::npos || python_bin.find("/mnt/") != std::string::npos) {
-            return "./tmp";
-        }
-    }
-    return "/tmp";
+    return runner_common::determine_temp_dir(python_bin);
 }
 
 void cleanup_processes() {
@@ -128,50 +126,10 @@ public:
         cfg.api_host = "localhost";
         cfg.api_port = 5001;
 
-        std::ifstream file(filename);
-        if (!file.is_open()) {
-            std::cerr << "Error: Could not open " << filename << std::endl;
-            return cfg;
-        }
-
-        std::string line, current_section;
-        int base_indent = -1;
-
-        while (std::getline(file, line)) {
-            std::string original = line;
-            size_t comment_pos = line.find('#');
-            if (comment_pos != std::string::npos) {
-                line = line.substr(0, comment_pos);
-            }
-
-            line = trim(line);
-            if (line.empty()) continue;
-
-            int indent = getIndent(original);
-
-            if (line.find(':') != std::string::npos) {
-                auto pos = line.find(':');
-                std::string key = trim(line.substr(0, pos));
-                std::string value = trim(line.substr(pos + 1));
-                value = unquote(value);
-
-                if (base_indent == -1 || indent <= base_indent) {
-                    base_indent = indent;
-                    current_section = "";
-                } else if (indent > base_indent) {
-                    if (value.empty() || key == "cpp_evaluator" || key == "bleu" || 
-                        key == "spice" || key == "llm_judge" || key == "phoenix" || key == "jmeter") {
-                        current_section = key;
-                        continue;
-                    }
-
-                    if (!current_section.empty()) {
-                        key = current_section + "." + key;
-                    }
-                }
-
-                if (value == "null" || value.empty()) continue;
-
+        runner_common::for_each_yaml_kv(
+            filename,
+            {"cpp_evaluator", "bleu", "spice", "llm_judge", "phoenix", "jmeter"},
+            [&](const std::string& key, const std::string& value) {
                 if (key == "prompt") cfg.prompt = value;
                 else if (key == "data_path") cfg.data_path = value;
                 else if (key == "visualization_goal") cfg.visualization_goal = value;
@@ -212,34 +170,8 @@ public:
                 else if (key == "jmeter.api_port") cfg.api_port = std::stoi(value);
                 else if (key == "jmeter.auto_start_api") cfg.jmeter_auto_start_api = (value == "true");
             }
-        }
+        );
         return cfg;
-    }
-
-private:
-    static int getIndent(const std::string& s) {
-        int count = 0;
-        for (char c : s) {
-            if (c == ' ') count++;
-            else if (c == '\t') count += 4;
-            else break;
-        }
-        return count;
-    }
-
-    static std::string trim(const std::string& s) {
-        size_t start = s.find_first_not_of(" \t\r\n");
-        if (start == std::string::npos) return "";
-        size_t end = s.find_last_not_of(" \t\r\n");
-        return s.substr(start, end - start + 1);
-    }
-
-    static std::string unquote(const std::string& s) {
-        std::string result = trim(s);
-        if (result.size() >= 2 && result[0] == '"' && result.back() == '"') {
-            return result.substr(1, result.size() - 2);
-        }
-        return result;
     }
 };
 
@@ -253,109 +185,17 @@ public:
 
 class SimpleJSONParser {
 public:
-    static std::vector<JSONTestCase> parse(const std::string& filename) {
-        std::vector<JSONTestCase> cases;
-        std::ifstream file(filename);
-        if (!file.is_open()) {
-            std::cerr << "Error: Could not open " << filename << std::endl;
-            return cases;
-        }
-
-        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        file.close();
-
-        size_t pos = 0;
-        while ((pos = content.find("{", pos)) != std::string::npos) {
-            size_t end = findMatchingBrace(content, pos);
-            if (end == std::string::npos) break;
-
-            std::string obj = content.substr(pos, end - pos + 1);
-            JSONTestCase tc;
-            tc.prompt = extractValue(obj, "prompt");
-            tc.gt_data = extractValue(obj, "gt_data");
-            tc.gt_analysis = extractValue(obj, "gt_analysis");
-            tc.gt_sql = extractValue(obj, "gt_sql");
-
-            if (!tc.prompt.empty()) {
-                cases.push_back(tc);
-            }
-            pos = end + 1;
-        }
-        return cases;
-    }
-
-private:
-    static size_t findMatchingBrace(const std::string& s, size_t start) {
-        int depth = 0;
-        for (size_t i = start; i < s.size(); ++i) {
-            if (s[i] == '{') depth++;
-            else if (s[i] == '}') {
-                depth--;
-                if (depth == 0) return i;
-            }
-        }
-        return std::string::npos;
-    }
-
-    static std::string extractValue(const std::string& obj, const std::string& key) {
-        std::string searchKey = "\"" + key + "\"";
-        size_t pos = obj.find(searchKey);
-        if (pos == std::string::npos) return "";
-
-        pos = obj.find(':', pos);
-        if (pos == std::string::npos) return "";
-        pos++;
-
-        while (pos < obj.size() && (obj[pos] == ' ' || obj[pos] == '\t')) pos++;
-
-        if (pos >= obj.size() || obj[pos] != '"') return "";
-        pos++;
-
-        std::string value;
-        bool escaped = false;
-        while (pos < obj.size()) {
-            if (escaped) {
-                if (obj[pos] == 'n') value += '\n';
-                else if (obj[pos] == 't') value += '\t';
-                else if (obj[pos] == 'r') value += '\r';
-                else value += obj[pos];
-                escaped = false;
-            } else if (obj[pos] == '\\') {
-                escaped = true;
-            } else if (obj[pos] == '"') {
-                break;
-            } else {
-                value += obj[pos];
-            }
-            pos++;
-        }
-        return value;
+    static std::vector<runner_common::JsonTestCase> parse(const std::string& filename) {
+        return runner_common::parse_json_test_cases(filename);
     }
 };
 
 static std::string quote_arg(const std::string& s) {
-    if (s.empty()) return "\"\"";
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('"');
-    for (char c : s) {
-        if (c == '"') out += "\\\"";
-        else if (c == '\n') out += "\\n";
-        else if (c == '\t') out += "\\t";
-        else out.push_back(c);
-    }
-    out.push_back('"');
-    return out;
+    return runner_common::quote_arg(s);
 }
 
 std::string replace_all(const std::string& str, const std::string& from, const std::string& to) {
-    std::string result = str;
-    size_t pos = 0;
-    while ((pos = result.find(from, pos)) != std::string::npos) {
-        result.replace(pos, from.length(), to);
-        pos += to.length();
-    }
-    return result;
+    return runner_common::replace_all(str, from, to);
 }
 
 std::string modify_jmx_variables(const std::string& jmx_content, const SimpleYAML::Config& cfg) {
@@ -588,93 +428,40 @@ int run_jmeter(const SimpleYAML::Config& cfg) {
 
 std::string build_command(const SimpleYAML::Config& cfg, const std::string& prompt = "",
                          const std::string& gt_csv = "", const std::string& gt_text = "") {
-    std::ostringstream cmd;
-    cmd << (cfg.python_bin.empty() ? "python" : cfg.python_bin) << " -m Agent.data_agent";
-
-    std::string use_prompt = prompt.empty() ? cfg.prompt : prompt;
-    std::string use_gt_csv = gt_csv.empty() ? cfg.gt_csv : gt_csv;
-    std::string use_gt_text = gt_text.empty() ? cfg.gt_text : gt_text;
-
-    cmd << " " << quote_arg(use_prompt);
-
-    if (!cfg.data_path.empty()) cmd << " --data " << quote_arg(cfg.data_path);
-    if (!cfg.visualization_goal.empty()) cmd << " --goal " << quote_arg(cfg.visualization_goal);
-    if (!cfg.model.empty()) cmd << " --model " << quote_arg(cfg.model);
-    if (!cfg.ollama_url.empty()) cmd << " --ollama_url " << quote_arg(cfg.ollama_url);
-
-    cmd << " --temp " << cfg.temperature;
-
-    if (cfg.agent_mode == "lookup_only") {
-        cmd << " --lookup_only";
-    } else if (cfg.agent_mode == "analysis") {
-        cmd << " --no_vis";
-    }
-
-    if (cfg.best_of_n > 1) {
-        cmd << " --best_of_n " << cfg.best_of_n;
-        if (!cfg.temperature_max.empty()) {
-            cmd << " --temp-max " << cfg.temperature_max;
-        }
-    }
-
-    if (!cfg.save_dir.empty()) cmd << " --save_dir " << quote_arg(cfg.save_dir);
-    if (!use_gt_csv.empty()) cmd << " --gt_csv " << quote_arg(use_gt_csv);
-    if (!use_gt_text.empty()) cmd << " --gt_text " << quote_arg(use_gt_text);
-
-    if (cfg.enable_csv_eval) {
-        if (cfg.csv_eval_method == "python") {
-            cmd << " --py_csv_eval";
-        } else if (cfg.csv_eval_method == "cpp") {
-            cmd << " --cpp_csv_eval";
-            if (!cfg.cpp_evaluator_exe.empty())
-                cmd << " --evaluator_exe " << quote_arg(cfg.cpp_evaluator_exe);
-            if (!cfg.cpp_evaluator_keys.empty())
-                cmd << " --eval_keys " << quote_arg(cfg.cpp_evaluator_keys);
-        }
-        cmd << " --iou_type " << cfg.csv_iou_type;
-    }
-
-    if (cfg.enable_text_eval) {
-        if (cfg.text_eval_method == "bleu") {
-            cmd << " --bleu_text_eval";
-            if (cfg.bleu_use_nltk) cmd << " --bleu_nltk";
-        } else if (cfg.text_eval_method == "spice") {
-            cmd << " --spice_text_eval";
-            if (!cfg.spice_jar_path.empty())
-                cmd << " --spice_jar " << quote_arg(cfg.spice_jar_path);
-            if (!cfg.spice_java_bin.empty())
-                cmd << " --spice_java_bin " << quote_arg(cfg.spice_java_bin);
-        } else if (cfg.text_eval_method == "llm") {
-            cmd << " --llm_text_eval";
-            if (!cfg.llm_judge_model.empty())
-                cmd << " --llm_judge_model " << quote_arg(cfg.llm_judge_model);
-        }
-    }
-
-    if (cfg.enable_tracing) {
-        cmd << " --enable_tracing";
-        if (!cfg.phoenix_endpoint.empty())
-            cmd << " --phoenix_endpoint " << quote_arg(cfg.phoenix_endpoint);
-        if (!cfg.phoenix_project_name.empty())
-            cmd << " --project_name " << quote_arg(cfg.phoenix_project_name);
-    }
-
-    if (cfg.enable_codecarbon) {
-        cmd << " --enable_codecarbon";
-    }
-
-    return cmd.str();
+    runner_common::AgentCliConfig c;
+    c.prompt = cfg.prompt;
+    c.data_path = cfg.data_path;
+    c.visualization_goal = cfg.visualization_goal;
+    c.python_bin = cfg.python_bin;
+    c.model = cfg.model;
+    c.ollama_url = cfg.ollama_url;
+    c.temperature = cfg.temperature;
+    c.agent_mode = cfg.agent_mode;
+    c.best_of_n = cfg.best_of_n;
+    c.temperature_max = cfg.temperature_max;
+    c.save_dir = cfg.save_dir;
+    c.gt_csv = cfg.gt_csv;
+    c.gt_text = cfg.gt_text;
+    c.enable_csv_eval = cfg.enable_csv_eval;
+    c.csv_eval_method = cfg.csv_eval_method;
+    c.csv_iou_type = cfg.csv_iou_type;
+    c.cpp_evaluator_exe = cfg.cpp_evaluator_exe;
+    c.cpp_evaluator_keys = cfg.cpp_evaluator_keys;
+    c.enable_text_eval = cfg.enable_text_eval;
+    c.text_eval_method = cfg.text_eval_method;
+    c.bleu_use_nltk = cfg.bleu_use_nltk;
+    c.spice_jar_path = cfg.spice_jar_path;
+    c.spice_java_bin = cfg.spice_java_bin;
+    c.llm_judge_model = cfg.llm_judge_model;
+    c.enable_tracing = cfg.enable_tracing;
+    c.phoenix_endpoint = cfg.phoenix_endpoint;
+    c.phoenix_project_name = cfg.phoenix_project_name;
+    c.enable_codecarbon = cfg.enable_codecarbon;
+    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text);
 }
 
 int write_file(const std::string& filepath, const std::string& content) {
-    std::ofstream out(filepath, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-        std::cerr << "Error: Could not create file: " << filepath << std::endl;
-        return -1;
-    }
-    out << content;
-    out.close();
-    return 0;
+    return runner_common::write_file(filepath, content);
 }
 
 int run_direct_python(const SimpleYAML::Config& cfg) {

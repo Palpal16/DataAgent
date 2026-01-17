@@ -24,6 +24,7 @@ from typing import Dict, List, Optional
 import tempfile
 import numpy as np
 import argparse
+import time
 
 import duckdb
 import pandas as pd
@@ -87,11 +88,181 @@ class State(TypedDict):
     tool_choice: NotRequired[str]
     error: NotRequired[str]
     sql_query: Optional[str]
+    # Optional per-stage metrics (timings, emissions estimates)
+    stage_metrics: NotRequired[List[Dict[str, object]]]
+    emissions: NotRequired[Dict[str, object]]
+    # Optional LLM prompting mode: two-stage reasoning (notes then final)
+    two_stage_cot: NotRequired[bool]
+    cot_max_bullets: NotRequired[int]
+    cot_print_plan: NotRequired[bool]
+    cot_store_plan: NotRequired[bool]
+    planning_plans: NotRequired[List[Dict[str, str]]]
+
+def _append_stage_timing(state: Dict, stage: str, duration_ms: int) -> Dict:
+    metrics = list(state.get("stage_metrics", []) or [])
+    metrics.append({"stage": stage, "duration_ms": int(duration_ms)})
+    state["stage_metrics"] = metrics
+    return state
+
+def _wrap_node_with_timing(stage: str, fn, llm: ChatOllama, tracer=None):
+    """Wrap a LangGraph node to record wall-clock duration in state['stage_metrics']."""
+    def _inner(state: State):
+        t0 = time.perf_counter()
+        out = fn(state, llm, tracer)
+        t1 = time.perf_counter()
+        duration_ms = int((t1 - t0) * 1000)
+        # Ensure stage metrics are carried forward even if the node returns a fresh dict.
+        out = dict(out)
+        _append_stage_timing(out, stage, duration_ms)
+        return out
+    return _inner
 
 
 # -----------------------------
 # LLM Helpers
 # -----------------------------
+
+def _state_cot_enabled(state: State) -> bool:
+    try:
+        return bool(state.get("two_stage_cot", False))
+    except Exception:
+        return False
+
+def _state_cot_max_bullets(state: State, default: int = 8) -> int:
+    v = state.get("cot_max_bullets", default)
+    try:
+        n = int(v) if v is not None else default
+    except Exception:
+        n = default
+    return max(1, min(50, n))
+
+def _state_cot_print_plan(state: State) -> bool:
+    try:
+        return bool(state.get("cot_print_plan", False))
+    except Exception:
+        return False
+
+def _state_cot_store_plan(state: State) -> bool:
+    try:
+        return bool(state.get("cot_store_plan", False))
+    except Exception:
+        return False
+
+def _invoke_llm_two_stage(
+    *,
+    state: State,
+    llm: ChatOllama,
+    final_prompt: str,
+    task: str,
+    final_constraints: str,
+) -> str:
+    """Two-stage prompting: generate a short plan, then final output.
+
+    This is a *shareable* plan (high-level bullets), not hidden chain-of-thought.
+    """
+    # Stage 1: short plan (can be printed/saved if enabled)
+    max_bullets = _state_cot_max_bullets(state)
+    is_sql_task = ("sql" in task.lower()) or ("sql" in final_constraints.lower())
+
+    sql_plan_hint = ""
+    if is_sql_task:
+        sql_plan_hint = (
+            "\nSQL planning requirement:\n"
+            "- Include one bullet that explicitly lists what the SQL must contain to satisfy the request "
+            "(e.g., table name, selected columns, filters/WHERE, joins if needed, grouping/aggregation, "
+            "ordering, limits, date casting rules).\n"
+        )
+
+    def _looks_like_sql(text: str) -> bool:
+        t = (text or "").lstrip().lower()
+        return t.startswith("select ") or t.startswith("with ") or t.startswith("insert ") or t.startswith("update ") or t.startswith("delete ")
+
+    def _normalize_to_bullets(text: str, max_items: int) -> str:
+        lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+        if not lines:
+            return "- (no plan generated)"
+        # Keep only the first max_items logical lines
+        lines = lines[: max_items]
+        out = []
+        for ln in lines:
+            if ln.startswith("- "):
+                out.append(ln)
+            elif ln.startswith("* "):
+                out.append("- " + ln[2:])
+            else:
+                out.append("- " + ln)
+        return "\n".join(out)
+
+    plan_prompt = (
+        "Write a short plan to solve the task.\n"
+        f"- Max {max_bullets} bullet points\n"
+        "- Output MUST be bullet points, each line starting with '- '\n"
+        "- Do NOT provide the final answer/output\n"
+        "- Do NOT include any SQL code or code blocks (describe requirements, not code)\n"
+        "- Keep it high-level and safe to show to a user (no hidden reasoning)\n\n"
+        f"Task: {task}\n\n"
+        f"{sql_plan_hint}\n"
+        "Context:\n"
+        f"{final_prompt}\n"
+    )
+
+    # Try once, and if the model responds with SQL/code instead of bullets, ask it to rewrite.
+    plan_resp = llm.invoke(plan_prompt)
+    plan_raw = plan_resp.content if hasattr(plan_resp, "content") else str(plan_resp)
+    plan = _normalize_to_bullets(plan_raw, max_bullets)
+
+    if _looks_like_sql(plan_raw):
+        rewrite_prompt = (
+            "Rewrite the following into a short BULLET plan.\n"
+            f"- Max {max_bullets} bullet points\n"
+            "- Each line must start with '- '\n"
+            "- Do NOT include SQL/code; describe what the SQL should contain\n\n"
+            f"Text to rewrite:\n{plan_raw}\n"
+        )
+        plan2_resp = llm.invoke(rewrite_prompt)
+        plan2_raw = plan2_resp.content if hasattr(plan2_resp, "content") else str(plan2_resp)
+        plan = _normalize_to_bullets(plan2_raw, max_bullets)
+
+    if _state_cot_store_plan(state):
+        plans = list(state.get("planning_plans", []) or [])
+        plans.append({"task": str(task), "plan": str(plan)})
+        state["planning_plans"] = plans
+
+    if _state_cot_print_plan(state):
+        print("\n[Two-stage plan]")
+        print(f"Task: {task}")
+        print(plan.strip())
+        print("[/Two-stage plan]\n")
+
+    # Stage 2: final output only
+    final2 = (
+        f"{final_prompt}\n\n"
+        "Plan (already shown above if enabled; do not mention it explicitly):\n"
+        f"{plan}\n\n"
+        f"{final_constraints}\n"
+    )
+    resp = llm.invoke(final2)
+    return resp.content if hasattr(resp, "content") else str(resp)
+
+def _invoke_llm(
+    *,
+    state: State,
+    llm: ChatOllama,
+    prompt: str,
+    task: str,
+    final_constraints: str,
+) -> str:
+    """Invoke LLM either single-stage or two-stage, returning only final text."""
+    if _state_cot_enabled(state):
+        return _invoke_llm_two_stage(
+            state=state,
+            llm=llm,
+            final_prompt=prompt,
+            task=task,
+            final_constraints=final_constraints,
+        )
+    resp = llm.invoke(prompt)
+    return resp.content if hasattr(resp, "content") else str(resp)
 
 SQL_GENERATION_PROMPT = """Generate an SQL query based on the prompt.
 Please just reply with the SQL query and NO MORE, just the query.
@@ -117,8 +288,13 @@ def generate_sql_query(state: State, columns: List[str], table_name: str, llm: C
     formatted_prompt = SQL_GENERATION_PROMPT.format(
         prompt=state["prompt"], columns=columns, table_name=table_name
     )
-    response = llm.invoke(formatted_prompt)
-    sql_query = response.content if hasattr(response, "content") else str(response)
+    sql_query = _invoke_llm(
+        state=state,
+        llm=llm,
+        prompt=formatted_prompt,
+        task="Generate the correct SQL query for the user prompt.",
+        final_constraints="Return ONLY the SQL query (no markdown, no explanation).",
+    )
     cleaned_sql = (
         sql_query.strip()
         .replace("```sql", "")
@@ -186,8 +362,13 @@ def analyzing_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
         formatted_prompt = DATA_ANALYSIS_PROMPT.format(
             data=state.get("data", ""), prompt=state.get("prompt", ""), sql_query=state.get("sql_query","")
         )
-        analysis_result = llm.invoke(formatted_prompt)
-        analysis_text = analysis_result.content if hasattr(analysis_result, "content") else str(analysis_result)
+        analysis_text = _invoke_llm(
+            state=state,
+            llm=llm,
+            prompt=formatted_prompt,
+            task="Answer the user's question using the provided SQL output.",
+            final_constraints="Return ONLY the final answer text (no notes, no extra sections).",
+        )
         if tracer is not None:
             try:
                 with tracer.start_as_current_span("data_analysis", openinference_span_kind="tool") as span:  # type: ignore[attr-defined]
@@ -253,8 +434,14 @@ def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
         visualization_goal = state.get("visualization_goal")
         chart_config = state.get("chart_config")
 
-        response = llm.invoke(decision_prompt)
-        tool_choice = response.content.strip().lower()
+        tool_choice_raw = _invoke_llm(
+            state=state,
+            llm=llm,
+            prompt=decision_prompt,
+            task="Select the next tool for the agent workflow.",
+            final_constraints="Respond with ONLY one token from: lookup_sales_data, analyzing_data, create_visualization, end.",
+        )
+        tool_choice = str(tool_choice_raw).strip().lower()
         valid_tools = ["lookup_sales_data", "analyzing_data", "create_visualization", "end"]
         closest_match = difflib.get_close_matches(tool_choice, valid_tools, n=1, cutoff=0.6)
         matched_tool = closest_match[0] if closest_match else "lookup_sales_data"
@@ -362,8 +549,13 @@ def extract_chart_config(state: State, llm: ChatOllama) -> State:
     formatted_prompt = CHART_CONFIGURATION_PROMPT.format(
         data=data_text, visualization_goal=visualization_goal
     )
-    response = llm.invoke(formatted_prompt)
-    raw = response.content if hasattr(response, "content") else str(response)
+    raw = _invoke_llm(
+        state=state,
+        llm=llm,
+        prompt=formatted_prompt,
+        task="Infer a compact JSON chart configuration for the data.",
+        final_constraints="Return ONLY minified JSON (no markdown, no commentary).",
+    )
     chart_config = _parse_chart_config(raw)
     chart_config["data"] = data_text
     print("This is the cart_config: "+str(chart_config))
@@ -393,8 +585,13 @@ def create_chart(state: State, llm: ChatOllama) -> str:
         renders the chart using matplotlib.
     """
     formatted_prompt = CREATE_CHART_PROMPT.format(config=state.get("chart_config", {}))
-    response = llm.invoke(formatted_prompt)
-    code = response.content if hasattr(response, "content") else str(response)
+    code = _invoke_llm(
+        state=state,
+        llm=llm,
+        prompt=formatted_prompt,
+        task="Generate matplotlib code based on the given chart config.",
+        final_constraints="Return ONLY Python code (no markdown fences, no commentary).",
+    )
     # clean any accidental fences
     return code.replace("```python", "").replace("```", "").strip()
 
@@ -464,6 +661,10 @@ class SalesDataAgent:
         streaming: bool = True,
         data_path: Optional[str] = None,
         ollama_url: Optional[str] = None,
+        two_stage_cot: bool = False,
+        cot_max_bullets: int = 8,
+        cot_print_plan: bool = False,
+        cot_store_plan: bool = False,
         enable_tracing: bool = False,
         phoenix_api_key: Optional[str] = None,
         phoenix_endpoint: Optional[str] = None,
@@ -480,6 +681,13 @@ class SalesDataAgent:
             ollama_url: Optional override for Ollama base URL; defaults to OLLAMA_HOST or http://localhost:11434.
         """
         self.ollama_url = ollama_url or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        self.two_stage_cot = bool(two_stage_cot)
+        try:
+            self.cot_max_bullets = max(1, min(50, int(cot_max_bullets)))
+        except Exception:
+            self.cot_max_bullets = 8
+        self.cot_print_plan = bool(cot_print_plan)
+        self.cot_store_plan = bool(cot_store_plan)
         self.llm = ChatOllama(
             model=model,
             temperature=temperature,
@@ -544,10 +752,10 @@ class SalesDataAgent:
         llm = self.llm
         tracer = self.tracer
 
-        graph.add_node("decide_tool", partial(decide_tool, llm=llm, tracer=tracer))
-        graph.add_node("lookup_sales_data", partial(lookup_sales_data, llm=llm, tracer=tracer))
-        graph.add_node("analyzing_data", partial(analyzing_data, llm=llm, tracer=tracer))
-        graph.add_node("create_visualization", partial(create_visualization, llm=llm, tracer=tracer))
+        graph.add_node("decide_tool", _wrap_node_with_timing("decide_tool", decide_tool, llm=llm, tracer=tracer))
+        graph.add_node("lookup_sales_data", _wrap_node_with_timing("lookup_sales_data", lookup_sales_data, llm=llm, tracer=tracer))
+        graph.add_node("analyzing_data", _wrap_node_with_timing("analyzing_data", analyzing_data, llm=llm, tracer=tracer))
+        graph.add_node("create_visualization", _wrap_node_with_timing("create_visualization", create_visualization, llm=llm, tracer=tracer))
         graph.set_entry_point("decide_tool")
 
         graph.add_conditional_edges(
@@ -595,6 +803,10 @@ class SalesDataAgent:
         """
         state = {
             "prompt": prompt,
+            "two_stage_cot": self.two_stage_cot,
+            "cot_max_bullets": self.cot_max_bullets,
+            "cot_print_plan": self.cot_print_plan,
+            "cot_store_plan": self.cot_store_plan,
         }
         if not self.run_checked:
             print("Checking the model can run locally")
@@ -610,13 +822,21 @@ class SalesDataAgent:
                 if self.tracing_enabled and self.tracer is not None:
                     with self.tracer.start_as_current_span("AgentRun_LookupOnly", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
                         span.set_input(state)  # type: ignore[attr-defined]
+                        t0 = time.perf_counter()
                         result = lookup_sales_data(state, self.llm, self.tracer)
+                        t1 = time.perf_counter()
+                        result = dict(result)
+                        _append_stage_timing(result, "lookup_sales_data", int((t1 - t0) * 1000))
                         span.set_output(result)  # type: ignore[attr-defined]
                         if StatusCode is not None:
                             span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
                         return result
                 else:
+                    t0 = time.perf_counter()
                     result = lookup_sales_data(state, self.llm)
+                    t1 = time.perf_counter()
+                    result = dict(result)
+                    _append_stage_timing(result, "lookup_sales_data", int((t1 - t0) * 1000))
                     return result
             except Exception as _e:
                 return {**state, "error": f"Lookup failed: {str(_e)}"}
@@ -626,16 +846,34 @@ class SalesDataAgent:
                 if self.tracing_enabled and self.tracer is not None:
                     with self.tracer.start_as_current_span("AgentRun_NoVis", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
                         span.set_input(state)  # type: ignore[attr-defined]
+                        t0 = time.perf_counter()
                         state = lookup_sales_data(state, self.llm, self.tracer)
+                        t1 = time.perf_counter()
+                        state = dict(state)
+                        _append_stage_timing(state, "lookup_sales_data", int((t1 - t0) * 1000))
+
+                        t2 = time.perf_counter()
                         result = analyzing_data(state, self.llm, self.tracer)
+                        t3 = time.perf_counter()
+                        result = dict(result)
+                        _append_stage_timing(result, "analyzing_data", int((t3 - t2) * 1000))
                         print(f"\nAgent response: {result.get('answer', [None])[0]}")
                         span.set_output(result)  # type: ignore[attr-defined]
                         if StatusCode is not None:
                             span.set_status(StatusCode.OK)  # type: ignore[attr-defined]
                         return result
                 else:
+                    t0 = time.perf_counter()
                     state = lookup_sales_data(state, self.llm)
+                    t1 = time.perf_counter()
+                    state = dict(state)
+                    _append_stage_timing(state, "lookup_sales_data", int((t1 - t0) * 1000))
+
+                    t2 = time.perf_counter()
                     result = analyzing_data(state, self.llm, self.tracer)
+                    t3 = time.perf_counter()
+                    result = dict(result)
+                    _append_stage_timing(result, "analyzing_data", int((t3 - t2) * 1000))
                     print(f"\nAgent response: {result.get('answer', [None])[0]}")
                     return result
             except Exception as _e:
@@ -723,9 +961,21 @@ class SalesDataAgent:
                 text_score = None
                 
                 if csv_eval_fn:
-                    csv_score = csv_eval_fn(csv_path)
-                    score += csv_score
-                    result["csv_score"] = csv_score
+                    csv_out = csv_eval_fn(csv_path)
+                    if isinstance(csv_out, dict):
+                        csv_score = float(csv_out.get("score", 0.0) or 0.0)
+                        result["csv_score"] = csv_score
+                        # Keep full report (includes OpenMP benchmark if enabled)
+                        if "report" in csv_out:
+                            result["csv_eval_report"] = csv_out.get("report")
+                        if "metric_key" in csv_out:
+                            result["csv_metric_key"] = csv_out.get("metric_key")
+                        if "error" in csv_out:
+                            result["csv_eval_error"] = csv_out.get("error")
+                    else:
+                        csv_score = float(csv_out or 0.0)
+                        result["csv_score"] = csv_score
+                    score += float(csv_score or 0.0)
                 elif csv_path and save_dir:
                     gt_csv_path = os.path.join(save_dir, "gt_data.csv")
                     if os.path.exists(gt_csv_path):
@@ -739,8 +989,18 @@ class SalesDataAgent:
                         text_score = text_eval_fn(generated_text=analysis_text, prompt=result.get("prompt", ""), sql_query=result.get("sql_query", ""), data=result.get("data",""))
                     else:
                         text_score = text_eval_fn(analysis_text)
-                    score += text_score
-                    result["text_score"] = text_score
+
+                    # Allow composite metric outputs (e.g., {"bleu": x, "spice": y})
+                    if isinstance(text_score, dict):
+                        result.setdefault("text_scores", {})
+                        result["text_scores"].update({k: float(v) for k, v in text_score.items()})
+                        vals = [float(v) for v in text_score.values()] or [0.0]
+                        text_score_scalar = float(sum(vals) / len(vals))
+                        score += text_score_scalar
+                        result["text_score"] = text_score_scalar
+                    else:
+                        score += float(text_score)
+                        result["text_score"] = float(text_score)
                 
                 result["temperature"]= temps[i]
 
@@ -757,10 +1017,21 @@ class SalesDataAgent:
         
         best_idx = int(np.argmax(all_scores))
         best_result = all_results[best_idx]
+        best_score = float(all_scores[best_idx])
+        best_result = dict(best_result)
+        best_result["best_of_n"] = int(best_of_n)
+        best_result["best_idx"] = int(best_idx)
+        best_result["best_score"] = best_score
+        best_result["temps"] = temps
         
         results_path = os.path.join(save_dir, "all_results.json")
         with open(results_path, 'w') as f:
             json.dump(all_results, f, indent=2, default=str)
+
+        # Convenience artifact: best result only (easy to parse/aggregate)
+        best_path = os.path.join(save_dir, "best_result.json")
+        with open(best_path, "w", encoding="utf-8") as f:
+            json.dump(best_result, f, indent=2, default=str)
 
         score_variance = (max(all_scores) - min(all_scores))/max(all_scores) if max(all_scores) != 0 else 0.0
         return best_result, score_variance
@@ -786,36 +1057,25 @@ class SalesDataAgent:
             save_dir = tempfile.mkdtemp(prefix="agent_runs_")
         os.makedirs(save_dir, exist_ok=True)
         
-        # Wrap execution with CodeCarbon if requested and available
+        # Optional CodeCarbon timing/emissions tracking
+        tracker = None
+        codecarbon_dir = os.path.join(save_dir, "codecarbon")
         if enable_codecarbon and _CODECARBON_AVAILABLE:
-            codecarbon_dir = os.path.join(save_dir, "codecarbon")
             os.makedirs(codecarbon_dir, exist_ok=True)
             try:
-                with EmissionsTracker(  # type: ignore[call-arg]
+                tracker = EmissionsTracker(  # type: ignore[call-arg]
                     project_name="SalesDataAgent",
                     output_dir=codecarbon_dir,
                     save_to_file=True,
                     measure_power_secs=1,
                     log_level="error",
-                ):
-                    return self.run_with_evaluation(
-                        prompt=prompt,
-                        visualization_goal=visualization_goal,
-                        lookup_only=lookup_only,
-                        no_vis=no_vis,
-                        best_of_n=best_of_n,
-                        temp=temp,
-                        temp_max=temp_max,
-                        csv_eval_fn=csv_eval_fn,
-                        text_eval_fn=text_eval_fn,
-                        save_dir=save_dir,
-                        llm_text_eval=llm_text_eval,
-                    )
+                )
+                tracker.start()  # type: ignore[union-attr]
             except Exception as e:
-                print(f"CodeCarbon tracking failed: {e}, continuing without it")
-                # Fall through to run without CodeCarbon
-        
-        return self.run_with_evaluation(
+                print(f"CodeCarbon tracking failed to start: {e}, continuing without it")
+                tracker = None
+
+        best_result, score_variance = self.run_with_evaluation(
             prompt=prompt,
             visualization_goal=visualization_goal,
             lookup_only=lookup_only,
@@ -828,6 +1088,53 @@ class SalesDataAgent:
             save_dir=save_dir,
             llm_text_eval=llm_text_eval,
         )
+
+        # Stop tracker and attach total emissions + per-stage estimates (proportional to time).
+        if tracker is not None:
+            try:
+                total_emissions_kg = float(tracker.stop())  # type: ignore[union-attr]
+                # CodeCarbon also writes its own CSV; we attach a compact summary for downstream analysis.
+                emissions_summary: Dict[str, object] = {"total_emissions_kg": total_emissions_kg}
+                stage_metrics = list((best_result or {}).get("stage_metrics", []) or [])
+                total_ms = sum(int(m.get("duration_ms", 0) or 0) for m in stage_metrics) or 0
+                stage_est = []
+                if total_ms > 0:
+                    for m in stage_metrics:
+                        ms = int(m.get("duration_ms", 0) or 0)
+                        frac = ms / total_ms
+                        stage_est.append(
+                            {
+                                "stage": m.get("stage", ""),
+                                "duration_ms": ms,
+                                "emissions_kg_est": total_emissions_kg * frac,
+                            }
+                        )
+                emissions_summary["stage_emissions_est"] = stage_est
+                best_result = dict(best_result or {})
+                best_result["emissions"] = emissions_summary
+
+                # Save a dedicated artifact for convenience
+                with open(os.path.join(save_dir, "stage_metrics.json"), "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "prompt": prompt,
+                            "stage_metrics": stage_metrics,
+                            "emissions": emissions_summary,
+                        },
+                        f,
+                        indent=2,
+                    )
+
+                # Overwrite best_result.json with emissions included (if it exists)
+                try:
+                    with open(os.path.join(save_dir, "best_result.json"), "w", encoding="utf-8") as f:
+                        json.dump(best_result, f, indent=2, default=str)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"CodeCarbon tracking failed to stop/record: {e}")
+
+        return best_result, score_variance
 
 __all__ = ["SalesDataAgent", "State"]
 
@@ -860,13 +1167,22 @@ if __name__ == "__main__":
     csv_eval_group.add_argument("--cpp_csv_eval", action="store_true", help="Use C++ evaluator for CSV IoU")
     parser.add_argument("--evaluator_exe", type=str, default=None, help="Path to C++ comparator executable")
     parser.add_argument("--eval_keys", type=str, default=None, help="Comma-separated key columns for C++ comparator")
+    parser.add_argument("--evaluator_threads", type=int, default=0, help="Threads for C++ comparator (OpenMP). 0 = default")
+    parser.add_argument("--evaluator_benchmark", action="store_true", help="Run C++ comparator benchmark (serial vs OpenMP)")
+    parser.add_argument("--evaluator_benchmark_iters", type=int, default=3, help="Benchmark iterations (min time is reported)")
     parser.add_argument("--iou_type", type=str, default="rows", choices=["columns", "rows", "table"], help="Type of IoU to use for CSV evaluation, choose between 'columns', 'rows', 'table'")
 
+    # Two-stage reasoning (notes -> final). Notes are not returned to the user.
+    parser.add_argument("--two_stage_cot", action="store_true", help="Enable two-stage reasoning (internal notes then final output)")
+    parser.add_argument("--cot_max_bullets", type=int, default=8, help="Max bullet points for internal notes (two-stage mode)")
+    parser.add_argument("--cot_print_plan", action="store_true", help="Print the stage-1 plan to stdout (two-stage mode)")
+    parser.add_argument("--cot_store_plan", action="store_true", help="Store stage-1 plans in best_result.json under planning_plans (two-stage mode)")
+
     # Text evaluation options
-    text_eval_group = parser.add_mutually_exclusive_group()
-    text_eval_group.add_argument("--spice_text_eval", action="store_true")
-    text_eval_group.add_argument("--bleu_text_eval", action="store_true")
-    text_eval_group.add_argument("--llm_text_eval", action="store_true") 
+    # NOTE: BLEU and SPICE can be enabled together (combined reporting).
+    parser.add_argument("--spice_text_eval", action="store_true")
+    parser.add_argument("--bleu_text_eval", action="store_true")
+    parser.add_argument("--llm_text_eval", action="store_true")
     parser.add_argument("--bleu_nltk", action="store_true", help="Use nltk for BLEU implementation instead of simple BLEU")
     parser.add_argument("--spice_jar", type=str, default=None, help="Path to SPICE jar (e.g., spice-1.0.jar)")
     parser.add_argument("--spice_java_bin", type=str, default="java", help="Java executable for SPICE")
@@ -890,7 +1206,11 @@ if __name__ == "__main__":
         enable_tracing=args.enable_tracing,
         phoenix_endpoint=args.phoenix_endpoint,
         project_name=args.project_name,
-        ollama_url=args.ollama_url
+        ollama_url=args.ollama_url,
+        two_stage_cot=args.two_stage_cot,
+        cot_max_bullets=args.cot_max_bullets,
+        cot_print_plan=args.cot_print_plan,
+        cot_store_plan=args.cot_store_plan,
     )
 
     # Get evaluation functions based on arguments
@@ -901,6 +1221,9 @@ if __name__ == "__main__":
         cpp_csv_eval=args.cpp_csv_eval,
         evaluator_exe=args.evaluator_exe,
         eval_keys=args.eval_keys,
+        evaluator_threads=args.evaluator_threads,
+        evaluator_benchmark=args.evaluator_benchmark,
+        evaluator_benchmark_iters=args.evaluator_benchmark_iters,
         gt_text_path=args.gt_text,
         iou_type=args.iou_type,
         spice_text_eval=args.spice_text_eval,
