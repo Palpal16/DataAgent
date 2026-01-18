@@ -15,13 +15,13 @@
 # ================================================================================
 
 # User's natural language prompt/question
-prompt: "average yearly sales"
+prompt: "do a plot of the average yearly sales"
 
 # Path to parquet data file (null = use default)
 data_path: null
 
 # Optional visualization goal (if different from prompt)
-visualization_goal: null
+visualization_goal: do a plot of the average yearly sales
 
 # ================================================================================
 # PYTHON
@@ -50,11 +50,11 @@ temperature: 0.1
 #   lookup_only: Only fetch data (fastest)
 #   analysis:    Fetch data + analyze (no visualization)
 #   full:        Complete pipeline with visualization code
-agent_mode: "analysis"
+agent_mode: "full"
 
 # Two-stage reasoning (internal notes -> final output). Notes are not printed/saved.
-two_stage_cot: true
-cot_max_bullets: 8
+two_stage_cot: false
+cot_max_bullets: 7
 cot_print_plan: true
 cot_store_plan: false
 

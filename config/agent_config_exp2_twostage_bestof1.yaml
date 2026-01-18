@@ -1,0 +1,69 @@
+# ================================================================================
+# EXPERIMENT 2
+# Two-stage plan enabled, best_of_n=1, temperature=2.0
+# Repetitions: 3
+# ================================================================================
+
+prompt: "average yearly sales"
+data_path: null
+visualization_goal: null
+python_bin: "/mnt/c/Users/Recup/Documents/Polimi/PACS/DataAgent/.venv/Scripts/python.exe"
+model: "llama3.2:3b"
+ollama_url: "http://localhost:11434"
+
+temperature: 2.0
+temperature_max: "2.0"
+
+agent_mode: "analysis"
+
+# Two-stage plan enabled for Exp2
+two_stage_cot: true
+cot_max_bullets: 7
+cot_print_plan: true
+cot_store_plan: false
+
+save_dir: ./output/exp2_twostage_bestof1
+
+gt_csv: null
+gt_text: null
+
+enable_csv_eval: true
+csv_eval_method: "python"
+csv_iou_type: "table"
+cpp_evaluator:
+  executable: null
+  keys: null
+  threads: 8
+  benchmark: true
+  benchmark_iters: 10
+
+enable_text_eval: true
+text_eval_method: "bleu+spice"
+bleu:
+  use_nltk: false
+spice:
+  jar_path: "C:/Users/Recup/Documents/Polimi/PACS/DataAgent/SPICE-1.0/spice-1.0.jar"
+  java_bin: "java"
+llm_judge:
+  model: null
+
+test_cases_json: ./evaluation/our_dataset_test.json
+run_batch: true
+
+# Use sweep just to repeat the same setting 3 times
+sweep:
+  enabled: true
+  best_of_n: "1"
+  temperature: "2.0"
+  temperature_max: "2.0"
+  repetitions: 3
+
+enable_tracing: false
+phoenix:
+  endpoint: "http://localhost:6006/v1/traces"
+  project_name: "evaluating-agent"
+  api_key: null
+  auto_start: true
+
+enable_codecarbon: true
+
