@@ -12,7 +12,7 @@ workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
-PREFIX = 'our' #options: 'our', 'claude', 'gpt', 'gpt_columns'
+PREFIX = 'vis' #options: 'our', 'claude', 'gpt', 'gpt_columns', 'final', 'vis'
 
 TRANSACTION_DATA_FILE_PATH = 'data/Store_Sales_Price_Elasticity_Promotions_Data.parquet'
 DATASET_FILE_PATH = f"evaluation/{PREFIX}_dataset.json"
@@ -71,6 +71,30 @@ queries = {
         "Across the full dataset, return the 40 SKUs with the highest average unit price among SKUs with at least 50 units sold; avg_unit_price = sum(Total_Sale_Value)/sum(Qty_Sold); tie-break by SKU_Coded ASC.",
         "Return the 30 most recent Sold_Date values aggregated by date; order by Sold_Date DESC.",
         "For 2022, return the top 25 stores by total units sold for Product_Class_Code = 22975; tie-break by Store_Number ASC."
+    ],
+    'final' : [
+        "Return the 12 months of 2023 with total revenue and total units sold; order by month_start ASC.",
+        "Return the top 20 SKUs by total units sold across the full dataset; tie-break by higher total revenue, then SKU_Coded ASC.",
+        "For 2022, return the top 15 Product_Class_Code by total revenue; tie-break by higher total units, then Product_Class_Code ASC.",
+        "For 2023, return the top 25 stores by promotional unit share (promo_units/total_units) among stores with at least 100 total units; tie-break by Store_Number ASC.",
+        "For Q1 2023 (2023-01-01 to 2023-03-31), return the top 30 stores by total revenue; tie-break by Store_Number ASC.",
+        "For 2023, return the top 10 SKUs by total revenue with avg unit price = sum(Total_Sale_Value)/sum(Qty_Sold); tie-break by SKU_Coded ASC.",
+        "For 2023, return month-by-promo aggregates; order by month_start ASC, On_Promo ASC; expect 24 rows.",
+        "For 2023, return the top 50 stores by distinct SKUs sold; tie-break by Store_Number ASC.",
+        "For 2023, return the top 30 Product_Class_Code by promotional units sold (On_Promo=1); tie-break by Product_Class_Code ASC.",
+        "Across the full dataset, return the 40 SKUs with the highest average unit price among SKUs with at least 50 units sold; avg_unit_price = sum(Total_Sale_Value)/sum(Qty_Sold); tie-break by SKU_Coded ASC.",
+        "Return the 30 most recent Sold_Date values aggregated by date; order by Sold_Date DESC.",
+        "For 2022, return the top 25 stores by total units sold for Product_Class_Code = 22975; tie-break by Store_Number ASC.",
+        "What is the mean of the sales of october month of 2022",
+        "How many skus have been sold in the month of september 2022"
+    ],
+    'vis' :[
+    "Return the 12 months of 2023 with total revenue and total units sold, ordered by month. Then plot a line chart with two series: total revenue and total units (use a secondary y-axis if helpful).",
+    "For store 2970 in February 2024, return daily total revenue by date, ordered ascending. Then visualize it as a line chart and overlay a 7-day moving average.",
+    "For 2023, return the top 15 SKUs by total revenue, including total units and average unit price. Then make (a) a horizontal bar chart of revenue by SKU and (b) a scatter plot of average unit price vs total units, labeling the top 5 revenue SKUs.",
+    "For 2023, return monthly aggregates split by promotion status (on-promo vs not): total revenue and total units. Then visualize a stacked bar chart per month showing promo vs non-promo revenue, and a separate line chart of promo revenue share over time.",
+    "For 2023, return one row per store with total revenue and total units. Then plot a scatter chart of revenue vs units (each point = store) and annotate the top 3 stores by revenue.",
+    "For 2022/2024, return a table of product class by month with total revenue. Then visualize a heatmap (rows = product class, columns = month, color = revenue) and also return the top 5 product classes by total revenue overall.",
     ]
 }
 
