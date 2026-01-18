@@ -115,21 +115,52 @@ public:
         cfg.spice_java_bin = "java";
         cfg.phoenix_endpoint = "http://localhost:6006/v1/traces";
         cfg.phoenix_project_name = "evaluating-agent";
-#ifdef _WIN32
         cfg.python_bin = "python";
-#else
-        cfg.python_bin = "python3";
-#endif
         cfg.jmeter_bin = "./apache-jmeter-5.6.3/bin/jmeter";
         cfg.jmx_folder = "./jmx_files";
         cfg.jmeter_output_folder = "./output";
         cfg.api_host = "localhost";
         cfg.api_port = 5001;
 
-        runner_common::for_each_yaml_kv(
-            filename,
-            {"cpp_evaluator", "bleu", "spice", "llm_judge", "phoenix", "jmeter"},
-            [&](const std::string& key, const std::string& value) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open " << filename << std::endl;
+            return cfg;
+        }
+
+        std::string line, current_section;
+        int base_indent = -1;
+
+        while (std::getline(file, line)) {
+            std::string original = line;
+            size_t comment_pos = line.find('#');
+            if (comment_pos != std::string::npos) {
+                line = line.substr(0, comment_pos);
+            }
+
+            line = trim(line);
+            if (line.empty()) continue;
+
+            int indent = getIndent(original);
+
+            if (line.find(':') != std::string::npos) {
+                auto pos = line.find(':');
+                std::string key = trim(line.substr(0, pos));
+                std::string value = trim(line.substr(pos + 1));
+                value = unquote(value);
+
+                if (base_indent == -1 || indent <= base_indent) {
+                    base_indent = indent;
+                    if (value.empty()) current_section = key;
+                    else current_section = "";
+                } else if (indent > base_indent) {
+                    if (!current_section.empty()) {
+                        key = current_section + "." + key;
+                    }
+                }
+
+                if (value == "null" || value.empty()) continue;
+
                 if (key == "prompt") cfg.prompt = value;
                 else if (key == "data_path") cfg.data_path = value;
                 else if (key == "visualization_goal") cfg.visualization_goal = value;

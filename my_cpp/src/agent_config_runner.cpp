@@ -45,7 +45,167 @@ void signal_handler(int signum) {
     exit(signum);
 }
 
-using RunnerConfig = agent_config_runner::Config;
+class SimpleYAML {
+public:
+    struct Config {
+        std::string prompt;
+        std::string data_path;
+        std::string visualization_goal;
+        std::string python_bin;
+        std::string model;
+        std::string ollama_url;
+        double temperature;
+        std::string agent_mode;
+        int best_of_n;
+        std::string temperature_max;
+        std::string save_dir;
+        std::string gt_csv;
+        std::string gt_text;
+        bool enable_csv_eval;
+        std::string csv_eval_method;
+        std::string csv_iou_type;
+        std::string cpp_evaluator_exe;
+        std::string cpp_evaluator_keys;
+        bool enable_text_eval;
+        std::string text_eval_method;
+        bool bleu_use_nltk;
+        std::string spice_jar_path;
+        std::string spice_java_bin;
+        std::string llm_judge_model;
+        std::string test_cases_json;
+        bool run_batch;
+        bool enable_tracing;
+        std::string phoenix_endpoint;
+        std::string phoenix_project_name;
+        std::string phoenix_api_key;
+        bool phoenix_auto_start;
+        bool enable_codecarbon;
+    };
+
+    static Config parse(const std::string& filename) {
+        Config cfg;
+        cfg.temperature = 0.1;
+        cfg.best_of_n = 1;
+        cfg.enable_csv_eval = false;
+        cfg.enable_text_eval = false;
+        cfg.bleu_use_nltk = false;
+        cfg.run_batch = false;
+        cfg.enable_tracing = false;
+        cfg.phoenix_auto_start = true;
+        cfg.enable_codecarbon = false;
+        cfg.model = "llama3.2:3b";
+        cfg.ollama_url = "http://localhost:11434";
+        cfg.agent_mode = "analysis";
+        cfg.csv_eval_method = "python";
+        cfg.csv_iou_type = "rows";
+        cfg.text_eval_method = "bleu";
+        cfg.spice_java_bin = "java";
+        cfg.phoenix_endpoint = "http://localhost:6006/v1/traces";
+        cfg.phoenix_project_name = "evaluating-agent";
+        cfg.python_bin = "python";
+
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open " << filename << std::endl;
+            return cfg;
+        }
+
+        std::string line, current_section;
+        int base_indent = -1;
+
+        while (std::getline(file, line)) {
+            std::string original = line;
+            size_t comment_pos = line.find('#');
+            if (comment_pos != std::string::npos) {
+                line = line.substr(0, comment_pos);
+            }
+
+            line = trim(line);
+            if (line.empty()) continue;
+
+            int indent = getIndent(original);
+
+            if (line.find(':') != std::string::npos) {
+                auto pos = line.find(':');
+                std::string key = trim(line.substr(0, pos));
+                std::string value = trim(line.substr(pos + 1));
+                value = unquote(value);
+
+                if (base_indent == -1 || indent <= base_indent) {
+                    base_indent = indent;
+                    if (value.empty()) current_section = key;
+                    else current_section = "";
+                } else if (indent > base_indent) {
+                    if (!current_section.empty()) {
+                        key = current_section + "." + key;
+                    }
+                }
+
+                if (value == "null" || value.empty()) continue;
+
+                if (key == "prompt") cfg.prompt = value;
+                else if (key == "data_path") cfg.data_path = value;
+                else if (key == "visualization_goal") cfg.visualization_goal = value;
+                else if (key == "python_bin") cfg.python_bin = value;
+                else if (key == "model") cfg.model = value;
+                else if (key == "ollama_url") cfg.ollama_url = value;
+                else if (key == "temperature") cfg.temperature = std::stod(value);
+                else if (key == "agent_mode") cfg.agent_mode = value;
+                else if (key == "best_of_n") cfg.best_of_n = std::stoi(value);
+                else if (key == "temperature_max") cfg.temperature_max = value;
+                else if (key == "save_dir") cfg.save_dir = value;
+                else if (key == "gt_csv") cfg.gt_csv = value;
+                else if (key == "gt_text") cfg.gt_text = value;
+                else if (key == "enable_csv_eval") cfg.enable_csv_eval = (value == "true");
+                else if (key == "csv_eval_method") cfg.csv_eval_method = value;
+                else if (key == "csv_iou_type") cfg.csv_iou_type = value;
+                else if (key == "cpp_evaluator.executable") cfg.cpp_evaluator_exe = value;
+                else if (key == "cpp_evaluator.keys") cfg.cpp_evaluator_keys = value;
+                else if (key == "enable_text_eval") cfg.enable_text_eval = (value == "true");
+                else if (key == "text_eval_method") cfg.text_eval_method = value;
+                else if (key == "bleu.use_nltk") cfg.bleu_use_nltk = (value == "true");
+                else if (key == "spice.jar_path") cfg.spice_jar_path = value;
+                else if (key == "spice.java_bin") cfg.spice_java_bin = value;
+                else if (key == "llm_judge.model") cfg.llm_judge_model = value;
+                else if (key == "test_cases_json") cfg.test_cases_json = value;
+                else if (key == "run_batch") cfg.run_batch = (value == "true");
+                else if (key == "enable_tracing") cfg.enable_tracing = (value == "true");
+                else if (key == "phoenix.endpoint") cfg.phoenix_endpoint = value;
+                else if (key == "phoenix.project_name") cfg.phoenix_project_name = value;
+                else if (key == "phoenix.api_key") cfg.phoenix_api_key = value;
+                else if (key == "phoenix.auto_start") cfg.phoenix_auto_start = (value == "true");
+                else if (key == "enable_codecarbon") cfg.enable_codecarbon = (value == "true");
+            }
+        }
+        return cfg;
+    }
+
+private:
+    static int getIndent(const std::string& s) {
+        int count = 0;
+        for (char c : s) {
+            if (c == ' ') count++;
+            else if (c == '\t') count += 4;
+            else break;
+        }
+        return count;
+    }
+
+    static std::string trim(const std::string& s) {
+        size_t start = s.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) return "";
+        size_t end = s.find_last_not_of(" \t\r\n");
+        return s.substr(start, end - start + 1);
+    }
+
+    static std::string unquote(const std::string& s) {
+        std::string result = trim(s);
+        if (result.size() >= 2 && result[0] == '"' && result.back() == '"') {
+            return result.substr(1, result.size() - 2);
+        }
+        return result;
+    }
+};
 
 class JSONTestCase {
 public:
