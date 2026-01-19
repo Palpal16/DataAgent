@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from Agent.utils import compare_csv, bleu_score, run_cpp_comparator, prepare_gt_from_dataset
+from Agent.utils import check_spice_jar_runnable, spice_score_java
 
 
 def load_json(path: Path):
@@ -98,6 +99,16 @@ def main():
         default=None,
         help="Comma-separated key columns for C++ comparator (optional)",
     )
+    parser.add_argument(
+        "--spice-jar",
+        default=None,
+        help="Path to spice-1.0.jar (optional). If not provided, SPICE is skipped.",
+    )
+    parser.add_argument(
+        "--spice-java-bin",
+        default="java",
+        help="Java executable to use for SPICE (default: java).",
+    )
     args = parser.parse_args()
 
     root = Path.cwd()
@@ -146,6 +157,30 @@ def main():
         summary["bleu"] = bleu_score(answer_text, gt_analysis)
     else:
         summary["bleu"] = None
+
+    # Visualization text evaluation (BLEU + SPICE) against gt_visualization,
+    # only when a chart was actually generated in the run.
+    gt_visualization = case.get("gt_visualization", "") if case else ""
+    chart_generated = bool(result.get("chart_config")) or any(
+        ("matplotlib" in (step or "")) or ("plt." in (step or "")) for step in (result.get("answer") or [])
+    )
+    if chart_generated and gt_visualization:
+        # Use the same text format produced by the agent's config extractor.
+        gen_vis_text = f"This is the cart_config: {result.get('chart_config')}"
+        summary["visualization_bleu"] = bleu_score(gen_vis_text, gt_visualization)
+        if args.spice_jar:
+            check_spice_jar_runnable(spice_jar=args.spice_jar, java_bin=args.spice_java_bin)
+            summary["visualization_spice"] = spice_score_java(
+                gen_vis_text,
+                gt_visualization,
+                spice_jar=args.spice_jar,
+                java_bin=args.spice_java_bin,
+            )
+        else:
+            summary["visualization_spice"] = None
+    else:
+        summary["visualization_bleu"] = None
+        summary["visualization_spice"] = None
 
     if args.cpp_evaluator:
         keys = [k.strip() for k in (args.eval_keys or "").split(",") if k.strip()] or None

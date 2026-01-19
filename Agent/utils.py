@@ -59,6 +59,7 @@ def prepare_gt_from_dataset(
     gt_csv_filename: str = "gt_data.csv",
     gt_results_filename: str = "gt_results.json",
     gt_text_filename: str = "gt_analysis.txt",
+    gt_visualization_filename: str = "gt_visualization.txt",
 ) -> Dict[str, Optional[str]]:
     """Generate gt CSV/results files from dataset JSON for a prompt.
 
@@ -78,6 +79,7 @@ def prepare_gt_from_dataset(
     gt_csv_path = os.path.join(output_dir, gt_csv_filename)
     gt_results_path = os.path.join(output_dir, gt_results_filename)
     gt_text_path = None
+    gt_visualization_path = None
 
     gt_rows = text_to_csv(gt_data)
     if gt_rows:
@@ -91,6 +93,7 @@ def prepare_gt_from_dataset(
         "gt_sql": case.get("gt_sql", ""),
         "gt_data": case.get("gt_data", ""),
         "gt_analysis": case.get("gt_analysis", ""),
+        "gt_visualization": case.get("gt_visualization", ""),
     }
     with open(gt_results_path, "w", encoding="utf-8") as f:
         json.dump(gt_results, f, indent=2)
@@ -101,9 +104,16 @@ def prepare_gt_from_dataset(
         with open(gt_text_path, "w", encoding="utf-8") as f:
             f.write(gt_analysis)
 
+    gt_visualization = case.get("gt_visualization", "")
+    if gt_visualization:
+        gt_visualization_path = os.path.join(output_dir, gt_visualization_filename)
+        with open(gt_visualization_path, "w", encoding="utf-8") as f:
+            f.write(gt_visualization)
+
     return {
         "gt_csv_path": gt_csv_path,
         "gt_text_path": gt_text_path,
+        "gt_visualization_path": gt_visualization_path,
         "gt_results_path": gt_results_path,
         "case": case,
     }
@@ -518,7 +528,7 @@ def spice_score_java(
     *,
     spice_jar: str,
     java_bin: str = "java",
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 300,
 ) -> float:
     """Compute SPICE score (0..1) by calling the official Java SPICE jar.
 
@@ -541,6 +551,34 @@ def spice_score_java(
         raise TypeError("reference and hypothesis must be strings")
     if not reference.strip() or not hypothesis.strip():
         return 0.0
+
+    # SPICE is designed for natural language captions; feeding it code/dicts can make the
+    # Stanford parser very slow (or appear to hang). For visualization outputs we often
+    # compare chart configs / code-like strings, so we sanitize those to keep SPICE stable.
+    def _looks_like_code(text: str) -> bool:
+        t = (text or "")
+        # Heuristics: braces/quotes/colon-heavy dicts, common plotting tokens, etc.
+        return (
+            ("{" in t and "}" in t)
+            or ("plt." in t)
+            or ("chart_type" in t)
+            or ("x_axis" in t)
+            or ("y_axis" in t)
+        )
+
+    def _sanitize_for_spice(text: str, max_len: int = 600) -> str:
+        # Keep only word-like tokens; collapse whitespace; clip length.
+        cleaned = re.sub(r"[^A-Za-z0-9]+", " ", text or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if len(cleaned) > max_len:
+            cleaned = cleaned[:max_len].rstrip()
+        return cleaned
+
+    if _looks_like_code(reference) or _looks_like_code(hypothesis):
+        reference = _sanitize_for_spice(reference)
+        hypothesis = _sanitize_for_spice(hypothesis)
+        if not reference or not hypothesis:
+            return 0.0
 
     # Use absolute paths to avoid cwd-related issues inside the Java tool
     spice_jar_abs = os.path.abspath(spice_jar)

@@ -3,6 +3,7 @@
     "prompt": "What was the most popular product SKU?",
     "gt_sql": "SELECT SKU_Coded, SUM(Qty_Sold) as total_quantity FROM sales GROUP BY SKU_Coded ORDER BY total_quantity DESC LIMIT 1",
     "gt_data": "   SKU_Coded  total_quantity\n0    6200700         52262.0",
-    "gt_analysis": "The most popular product SKU is 6200700 with 52,262 total units sold."
+    "gt_analysis": "The most popular product SKU is 6200700 with 52,262 total units sold.",
+    "gt_visualization": "This is the cart_config: {'chart_type': 'bar', 'x_axis': 'SKU_Coded', 'y_axis': 'average_yearly_sales', 'title': 'Average Yearly Sales by SKU', 'data': '   SKU_Coded\n0    6200700'}"
   }
 ]

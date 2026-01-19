@@ -201,8 +201,34 @@ public:
                 else if (key == "jmeter.api_port") cfg.api_port = std::stoi(value);
                 else if (key == "jmeter.auto_start_api") cfg.jmeter_auto_start_api = (value == "true");
             }
-        );
+        }
         return cfg;
+    }
+
+private:
+    static int getIndent(const std::string& s) {
+        int count = 0;
+        for (char c : s) {
+            if (c == ' ') count++;
+            else if (c == '\t') count += 4;
+            else break;
+        }
+        return count;
+    }
+
+    static std::string trim(const std::string& s) {
+        size_t start = s.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) return "";
+        size_t end = s.find_last_not_of(" \t\r\n");
+        return s.substr(start, end - start + 1);
+    }
+
+    static std::string unquote(const std::string& s) {
+        std::string result = trim(s);
+        if (result.size() >= 2 && result.front() == '"' && result.back() == '"') {
+            return result.substr(1, result.size() - 2);
+        }
+        return result;
     }
 };
 
@@ -458,7 +484,7 @@ int run_jmeter(const SimpleYAML::Config& cfg) {
 }
 
 std::string build_command(const SimpleYAML::Config& cfg, const std::string& prompt = "",
-                         const std::string& gt_csv = "", const std::string& gt_text = "") {
+                         const std::string& gt_csv = "", const std::string& gt_text = "", const std::string& gt_visualization = "") {
     runner_common::AgentCliConfig c;
     c.prompt = cfg.prompt;
     c.data_path = cfg.data_path;
@@ -473,6 +499,7 @@ std::string build_command(const SimpleYAML::Config& cfg, const std::string& prom
     c.save_dir = cfg.save_dir;
     c.gt_csv = cfg.gt_csv;
     c.gt_text = cfg.gt_text;
+    c.gt_visualization = "";
     c.enable_csv_eval = cfg.enable_csv_eval;
     c.csv_eval_method = cfg.csv_eval_method;
     c.csv_iou_type = cfg.csv_iou_type;
@@ -488,7 +515,7 @@ std::string build_command(const SimpleYAML::Config& cfg, const std::string& prom
     c.phoenix_endpoint = cfg.phoenix_endpoint;
     c.phoenix_project_name = cfg.phoenix_project_name;
     c.enable_codecarbon = cfg.enable_codecarbon;
-    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text);
+    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text, gt_visualization);
 }
 
 int write_file(const std::string& filepath, const std::string& content) {

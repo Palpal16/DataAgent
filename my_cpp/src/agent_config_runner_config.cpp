@@ -32,6 +32,7 @@ Config parse_config_file(const std::string& filename) {
             else if (key == "save_dir") cfg.save_dir = value;
             else if (key == "gt_csv") cfg.gt_csv = value;
             else if (key == "gt_text") cfg.gt_text = value;
+            else if (key == "gt_visualization") cfg.gt_visualization = value;
 
             else if (key == "enable_csv_eval") cfg.enable_csv_eval = (value == "true");
             else if (key == "csv_eval_method") cfg.csv_eval_method = value;

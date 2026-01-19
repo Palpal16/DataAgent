@@ -19,6 +19,7 @@ struct Config {
     std::string save_dir;
     std::string gt_csv;
     std::string gt_text;
+    std::string gt_visualization;
 
     bool enable_csv_eval = false;
     std::string csv_eval_method = "python";

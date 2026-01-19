@@ -1,6 +1,6 @@
 # ================================================================================
 # EXPERIMENT 1
-# Best-of-N sweep: best_of_n in {1,2,3} at fixed temperature=2.0
+# Best-of-N sweep: best_of_n in {1,2,3} at fixed temperature=0.3
 # Repetitions: 3 per setting
 # ================================================================================
 
@@ -58,8 +58,8 @@ run_batch: true
 sweep:
   enabled: true
   best_of_n: "1,2,3"
-  temperature: "2.0"
-  temperature_max: "2.0"
+  temperature: "0.3"
+  temperature_max: "0.3"
   repetitions: 3
 
 enable_tracing: false

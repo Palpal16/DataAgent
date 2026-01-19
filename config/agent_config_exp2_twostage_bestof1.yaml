@@ -1,7 +1,7 @@
 # ================================================================================
 # EXPERIMENT 2
-# Two-stage plan enabled, best_of_n=1, temperature=2.0
-# Repetitions: 3
+# Two-stage plan enabled, best_of_n in {1,2}, temperature=2.0
+# Repetitions: 3 per setting
 # ================================================================================
 
 prompt: "average yearly sales"
@@ -22,7 +22,7 @@ cot_max_bullets: 7
 cot_print_plan: true
 cot_store_plan: false
 
-save_dir: ./output/exp2_twostage_bestof1
+save_dir: ./output/exp2_twostage_bestof_sweep
 
 gt_csv: null
 gt_text: null
@@ -53,7 +53,7 @@ run_batch: true
 # Use sweep just to repeat the same setting 3 times
 sweep:
   enabled: true
-  best_of_n: "1"
+  best_of_n: "1,2"
   temperature: "2.0"
   temperature_max: "2.0"
   repetitions: 3

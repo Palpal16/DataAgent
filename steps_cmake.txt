@@ -12,3 +12,7 @@ Implement something in Blur, spice and matrix
 launching the gmeter, energy consumption and metrics, running the load, calculate how many users and stuff, option of best of n,
 do template c++ for running this
 7. Prepare a presentation for the demo
+
+Last steps:
+Evaluation of Visualization Agent
+Reinforcement Learning Parameter Tuning

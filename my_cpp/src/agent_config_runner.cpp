@@ -23,6 +23,8 @@
 #include "runner_common.hpp"
 #include "agent_config_runner.hpp"
 
+using RunnerConfig = agent_config_runner::Config;
+
 static pid_t phoenix_pid = 0;
 static std::string temp_dir = "/tmp";
 
@@ -313,10 +315,11 @@ static void append_sweep_row(
     }
     if (!exists) {
         out << "sweep_id,repetition,test_case,prompt,best_of_n,temperature,temperature_max,"
-               "csv_score,bleu,spice,text_score,best_score,duration_ms,total_emissions_kg,test_dir\n";
+               "csv_score,bleu,spice,text_score,viz_bleu,viz_spice,viz_text_score,best_score,duration_ms,total_emissions_kg,test_dir\n";
     }
 
-    double csv_score = 0.0, text_score = 0.0, best_score = 0.0, bleu = 0.0, spice = 0.0, emissions = 0.0;
+    double csv_score = 0.0, text_score = 0.0, best_score = 0.0, bleu = 0.0, spice = 0.0;
+    double viz_bleu = 0.0, viz_spice = 0.0, viz_text_score = 0.0, emissions = 0.0;
     const std::string best_path = test_dir + "/best_result.json";
     const std::string best_txt = read_file_to_string(best_path);
     if (!best_txt.empty()) {
@@ -325,6 +328,9 @@ static void append_sweep_row(
         extract_json_number(best_txt, "best_score", best_score);
         extract_json_number(best_txt, "bleu", bleu);
         extract_json_number(best_txt, "spice", spice);
+        extract_json_number(best_txt, "viz_bleu", viz_bleu);
+        extract_json_number(best_txt, "viz_spice", viz_spice);
+        extract_json_number(best_txt, "viz_text_score", viz_text_score);
         extract_json_number(best_txt, "total_emissions_kg", emissions);
     }
 
@@ -339,6 +345,9 @@ static void append_sweep_row(
         << bleu << ","
         << spice << ","
         << text_score << ","
+        << viz_bleu << ","
+        << viz_spice << ","
+        << viz_text_score << ","
         << best_score << ","
         << duration_ms << ","
         << emissions << ","
@@ -376,7 +385,7 @@ pid_t start_phoenix(const RunnerConfig& cfg) {
 }
 
 std::string build_command(const RunnerConfig& cfg, const std::string& prompt = "",
-                         const std::string& gt_csv = "", const std::string& gt_text = "") {
+                         const std::string& gt_csv = "", const std::string& gt_text = "", const std::string& gt_visualization = "") {
     runner_common::AgentCliConfig c;
     c.prompt = cfg.prompt;
     c.data_path = cfg.data_path;
@@ -391,6 +400,7 @@ std::string build_command(const RunnerConfig& cfg, const std::string& prompt = "
     c.save_dir = cfg.save_dir;
     c.gt_csv = cfg.gt_csv;
     c.gt_text = cfg.gt_text;
+    c.gt_visualization = cfg.gt_visualization;
     c.enable_csv_eval = cfg.enable_csv_eval;
     c.csv_eval_method = cfg.csv_eval_method;
     c.csv_iou_type = cfg.csv_iou_type;
@@ -413,7 +423,7 @@ std::string build_command(const RunnerConfig& cfg, const std::string& prompt = "
     c.cot_max_bullets = cfg.cot_max_bullets;
     c.cot_print_plan = cfg.cot_print_plan;
     c.cot_store_plan = cfg.cot_store_plan;
-    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text);
+    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text, gt_visualization);
 }
 
 int write_file(const std::string& filepath, const std::string& content) {
@@ -603,7 +613,7 @@ int main(int argc, char** argv) {
                             std::filesystem::create_directories(test_dir);
 
                             // Write per-test GT artifacts
-                            std::string gt_csv_file, gt_text_file;
+                            std::string gt_csv_file, gt_text_file, gt_vis_file;
                             if (!test_cases[i].gt_data.empty()) {
                                 gt_csv_file = test_dir + "/gt_data.csv";
                                 auto rows = text_table_to_rows(test_cases[i].gt_data);
@@ -614,6 +624,10 @@ int main(int argc, char** argv) {
                                 gt_text_file = test_dir + "/gt_analysis.txt";
                                 write_file(gt_text_file, test_cases[i].gt_analysis);
                             }
+                            if (!test_cases[i].gt_visualization.empty()) {
+                                gt_vis_file = test_dir + "/gt_visualization.txt";
+                                write_file(gt_vis_file, test_cases[i].gt_visualization);
+                            }
 
                             RunnerConfig run_cfg = cfg;
                             run_cfg.save_dir = test_dir;
@@ -621,7 +635,7 @@ int main(int argc, char** argv) {
                             run_cfg.temperature = t;
                             run_cfg.temperature_max = (tmax == "null" ? "" : tmax);
 
-                            const std::string cmd = build_command(run_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file);
+                            const std::string cmd = build_command(run_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file, gt_vis_file);
                             std::cout << "[Sweep] Executing: " << cmd << std::endl;
                             const auto t0 = std::chrono::steady_clock::now();
                             int rc = system(cmd.c_str());
@@ -693,7 +707,7 @@ int main(int argc, char** argv) {
                 continue;  // Skip this test case
             }
 
-            std::string gt_csv_file, gt_text_file;
+            std::string gt_csv_file, gt_text_file, gt_vis_file;
 
             if (!test_cases[i].gt_data.empty()) {
                 gt_csv_file = save_dir + "/gt_data.csv";
@@ -719,11 +733,19 @@ int main(int argc, char** argv) {
                     continue;
                 }
             }
+            if (!test_cases[i].gt_visualization.empty()) {
+                gt_vis_file = save_dir + "/gt_visualization.txt";
+                if (write_file(gt_vis_file, test_cases[i].gt_visualization)!= 0) {
+                    std::cerr << "[ConfigRunner] Failed to create temp visualization GT file" << std::endl;
+                    fail_count++;
+                    continue;
+                }
+            }
 
             RunnerConfig test_cfg = cfg;
             test_cfg.save_dir = save_dir;
 
-            std::string cmd = build_command(test_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file);
+            std::string cmd = build_command(test_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file, gt_vis_file);
 
             std::cout << "[ConfigRunner] Executing: " << cmd << std::endl;
             long long duration_ms = 0;

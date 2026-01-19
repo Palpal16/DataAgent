@@ -918,6 +918,7 @@ class SalesDataAgent:
         temp_max: Optional[float] = None,
         csv_eval_fn: Optional[callable] = None,
         text_eval_fn: Optional[callable] = None,
+        viz_text_eval_fn: Optional[callable] = None,
         save_dir: Optional[str] = None,
         llm_text_eval: bool = False,
     ) -> Dict:
@@ -954,6 +955,9 @@ class SalesDataAgent:
                 
                 # Extract analysis text
                 analysis_text = result.get("answer", [None])[0] if result.get("answer") else None
+                viz_text = None
+                if result.get("answer") and isinstance(result.get("answer"), list) and len(result.get("answer")) >= 2:
+                    viz_text = result.get("answer", [None])[-1]
                 
                 # Evaluate
                 score = 0.0
@@ -1001,6 +1005,34 @@ class SalesDataAgent:
                     else:
                         score += float(text_score)
                         result["text_score"] = float(text_score)
+
+                # Visualization evaluation (only if we actually generated a chart/code and GT is provided)
+                if viz_text_eval_fn and viz_text:
+                    viz_score = None
+                    if llm_text_eval:
+                        viz_score = viz_text_eval_fn(
+                            generated_text=viz_text,
+                            prompt=result.get("prompt", ""),
+                            sql_query=result.get("sql_query", ""),
+                            data=result.get("data", ""),
+                        )
+                    else:
+                        viz_score = viz_text_eval_fn(viz_text)
+
+                    if isinstance(viz_score, dict):
+                        # Store prefixed component metrics (e.g., viz_bleu, viz_spice)
+                        result.setdefault("viz_text_scores", {})
+                        result["viz_text_scores"].update({k: float(v) for k, v in viz_score.items()})
+                        for k, v in viz_score.items():
+                            result[f"viz_{k}"] = float(v)
+                        vals = [float(v) for v in viz_score.values()] or [0.0]
+                        viz_score_scalar = float(sum(vals) / len(vals))
+                        result["viz_text_score"] = viz_score_scalar
+                        score += viz_score_scalar
+                    else:
+                        viz_score_scalar = float(viz_score or 0.0)
+                        result["viz_text_score"] = viz_score_scalar
+                        score += viz_score_scalar
                 
                 result["temperature"]= temps[i]
 
@@ -1048,6 +1080,7 @@ class SalesDataAgent:
         temp_max: Optional[float] = None,
         csv_eval_fn: Optional[callable] = None,
         text_eval_fn: Optional[callable] = None,
+        viz_text_eval_fn: Optional[callable] = None,
         save_dir: Optional[str] = None,
         enable_codecarbon: bool = False,
         llm_text_eval: bool = False,
@@ -1085,6 +1118,7 @@ class SalesDataAgent:
             temp_max=temp_max,
             csv_eval_fn=csv_eval_fn,
             text_eval_fn=text_eval_fn,
+            viz_text_eval_fn=viz_text_eval_fn,
             save_dir=save_dir,
             llm_text_eval=llm_text_eval,
         )
@@ -1144,6 +1178,7 @@ if __name__ == "__main__":
     parser.add_argument("prompt", type=str, help="User prompt/question")
     parser.add_argument("--gt_csv", type=str, default=None, help="Path to ground-truth CSV file")
     parser.add_argument("--gt_text", type=str, default=None, help="Path to a text file containing the ground-truth")
+    parser.add_argument("--gt_visualization", type=str, default=None, help="Path to ground-truth visualization text/code (for chart evaluation)")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to save run results")
 
     parser.add_argument("--data", dest="data_path", type=str, default=DEFAULT_DATA_PATH, help="Path to parquet file")
@@ -1236,6 +1271,20 @@ if __name__ == "__main__":
         ollama_url=args.ollama_url,
     )
 
+    # Separate evaluator for visualization output (uses same metric flags, but different GT file).
+    _, viz_text_eval_fn = get_evaluation_functions(
+        lookup_only=args.lookup_only,
+        gt_text_path=args.gt_visualization,
+        spice_text_eval=args.spice_text_eval,
+        bleu_text_eval=args.bleu_text_eval,
+        bleu_nltk=args.bleu_nltk,
+        spice_jar=args.spice_jar,
+        spice_java_bin=args.spice_java_bin,
+        llm_text_eval=args.llm_text_eval,
+        llm_judge_model=args.llm_judge_model,
+        ollama_url=args.ollama_url,
+    )
+
     # Run agent
     output, score_variance = agent.run(
         args.prompt,
@@ -1247,6 +1296,7 @@ if __name__ == "__main__":
         temp_max=args.temp_max,
         csv_eval_fn=csv_eval_fn,
         text_eval_fn=text_eval_fn,
+        viz_text_eval_fn=viz_text_eval_fn,
         save_dir=args.save_dir,
         enable_codecarbon=args.enable_codecarbon,
         llm_text_eval=args.llm_text_eval

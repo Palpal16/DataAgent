@@ -15,13 +15,13 @@
 # ================================================================================
 
 # User's natural language prompt/question
-prompt: "do a plot of the average yearly sales"
+prompt: null
 
 # Path to parquet data file (null = use default)
 data_path: null
 
 # Optional visualization goal (if different from prompt)
-visualization_goal: do a plot of the average yearly sales
+visualization_goal: null
 
 # ================================================================================
 # PYTHON
