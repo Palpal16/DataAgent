@@ -141,6 +141,20 @@ static std::string extract_json_string(const std::string& obj, const std::string
     return value;
 }
 
+static std::string extract_json_object_raw(const std::string& obj, const std::string& key) {
+    std::string search_key = "\"" + key + "\"";
+    size_t pos = obj.find(search_key);
+    if (pos == std::string::npos) return "";
+    pos = obj.find(':', pos);
+    if (pos == std::string::npos) return "";
+    pos++;
+    while (pos < obj.size() && (obj[pos] == ' ' || obj[pos] == '\t' || obj[pos] == '\r' || obj[pos] == '\n')) pos++;
+    if (pos >= obj.size() || obj[pos] != '{') return "";
+    const size_t end = find_matching_brace(obj, pos);
+    if (end == std::string::npos) return "";
+    return obj.substr(pos, end - pos + 1);
+}
+
 std::vector<JsonTestCase> parse_json_test_cases(const std::string& filename) {
     std::vector<JsonTestCase> cases;
     std::ifstream file(filename);
@@ -162,7 +176,9 @@ std::vector<JsonTestCase> parse_json_test_cases(const std::string& filename) {
         tc.prompt = extract_json_string(obj, "prompt");
         tc.gt_data = extract_json_string(obj, "gt_data");
         tc.gt_analysis = extract_json_string(obj, "gt_analysis");
+        tc.gt_vis_json = extract_json_object_raw(obj, "gt_vis");
         tc.gt_sql = extract_json_string(obj, "gt_sql");
+        tc.difficulty = extract_json_string(obj, "difficulty");
 
         if (!tc.prompt.empty()) cases.push_back(std::move(tc));
         pos = end + 1;
@@ -289,7 +305,8 @@ std::string build_agent_command(
     const AgentCliConfig& cfg,
     const std::string& prompt_override,
     const std::string& gt_csv_override,
-    const std::string& gt_text_override
+    const std::string& gt_text_override,
+    const std::string& gt_vis_override
 ) {
     std::ostringstream cmd;
     cmd << (cfg.python_bin.empty() ? "python" : cfg.python_bin) << " -m Agent.data_agent";
@@ -297,6 +314,7 @@ std::string build_agent_command(
     const std::string use_prompt = prompt_override.empty() ? cfg.prompt : prompt_override;
     const std::string use_gt_csv = gt_csv_override.empty() ? cfg.gt_csv : gt_csv_override;
     const std::string use_gt_text = gt_text_override.empty() ? cfg.gt_text : gt_text_override;
+    const std::string use_gt_vis = gt_vis_override.empty() ? cfg.gt_vis : gt_vis_override;
 
     cmd << " " << quote_arg(use_prompt);
 
@@ -323,6 +341,7 @@ std::string build_agent_command(
     if (!cfg.save_dir.empty()) cmd << " --save_dir " << quote_arg(cfg.save_dir);
     if (!use_gt_csv.empty()) cmd << " --gt_csv " << quote_arg(use_gt_csv);
     if (!use_gt_text.empty()) cmd << " --gt_text " << quote_arg(use_gt_text);
+    if (!use_gt_vis.empty()) cmd << " --gt_vis " << quote_arg(use_gt_vis);
 
     if (cfg.enable_csv_eval) {
         if (cfg.csv_eval_method == "python") {
@@ -385,6 +404,10 @@ std::string build_agent_command(
         if (cfg.cot_max_bullets > 0) cmd << " --cot_max_bullets " << cfg.cot_max_bullets;
         if (cfg.cot_print_plan) cmd << " --cot_print_plan";
         if (cfg.cot_store_plan) cmd << " --cot_store_plan";
+    }
+
+    if (cfg.emit_viz_placeholders) {
+        cmd << " --emit_viz_placeholders";
     }
 
     return cmd.str();

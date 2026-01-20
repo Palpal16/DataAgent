@@ -147,6 +147,21 @@ def main():
     else:
         summary["bleu"] = None
 
+    # Visualization spec evaluation (field accuracy) against gt_vis (dict),
+    # only when a chart config was generated in the run.
+    gt_vis = case.get("gt_vis", None) if case else None
+    if isinstance(gt_vis, dict) and isinstance(result.get("chart_config"), dict):
+        from Agent.utils import viz_config_field_accuracy
+        summary["viz_spec_report"] = viz_config_field_accuracy(
+            predicted=result.get("chart_config"),
+            ground_truth=gt_vis,
+            keys=["chart_type", "x_axis", "y_axis"],
+        )
+        summary["viz_spec_score"] = summary["viz_spec_report"].get("score")
+    else:
+        summary["viz_spec_report"] = None
+        summary["viz_spec_score"] = None
+
     if args.cpp_evaluator:
         keys = [k.strip() for k in (args.eval_keys or "").split(",") if k.strip()] or None
         if args.cpp_evaluator_wsl:

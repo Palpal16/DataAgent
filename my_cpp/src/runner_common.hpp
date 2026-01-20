@@ -32,7 +32,9 @@ struct JsonTestCase {
     std::string prompt;
     std::string gt_data;
     std::string gt_analysis;
+    std::string gt_vis_json;
     std::string gt_sql;
+    std::string difficulty;
 };
 
 std::vector<JsonTestCase> parse_json_test_cases(const std::string& filename);
@@ -69,6 +71,7 @@ struct AgentCliConfig {
     std::string save_dir;
     std::string gt_csv;
     std::string gt_text;
+    std::string gt_vis;
 
     bool enable_csv_eval = false;
     std::string csv_eval_method = "python";
@@ -97,13 +100,17 @@ struct AgentCliConfig {
     int cot_max_bullets = 8;
     bool cot_print_plan = false;
     bool cot_store_plan = false;
+
+    // Output shaping
+    bool emit_viz_placeholders = false;
 };
 
 std::string build_agent_command(
     const AgentCliConfig& cfg,
     const std::string& prompt_override = "",
     const std::string& gt_csv_override = "",
-    const std::string& gt_text_override = ""
+    const std::string& gt_text_override = "",
+    const std::string& gt_vis_override = ""
 );
 
 } // namespace runner_common

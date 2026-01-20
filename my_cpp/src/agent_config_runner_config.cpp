@@ -32,6 +32,7 @@ Config parse_config_file(const std::string& filename) {
             else if (key == "save_dir") cfg.save_dir = value;
             else if (key == "gt_csv") cfg.gt_csv = value;
             else if (key == "gt_text") cfg.gt_text = value;
+            else if (key == "gt_vis") cfg.gt_vis = value;
 
             else if (key == "enable_csv_eval") cfg.enable_csv_eval = (value == "true");
             else if (key == "csv_eval_method") cfg.csv_eval_method = value;
@@ -65,10 +66,14 @@ Config parse_config_file(const std::string& filename) {
             else if (key == "cot_print_plan") cfg.cot_print_plan = (value == "true");
             else if (key == "cot_store_plan") cfg.cot_store_plan = (value == "true");
 
+            else if (key == "emit_viz_placeholders") cfg.emit_viz_placeholders = (value == "true");
+
             else if (key == "sweep.enabled") cfg.sweep_enabled = (value == "true");
             else if (key == "sweep.best_of_n") cfg.sweep_best_of_n = value;
             else if (key == "sweep.temperature") cfg.sweep_temperature = value;
             else if (key == "sweep.temperature_max") cfg.sweep_temperature_max = value;
+            else if (key == "sweep.two_stage_cot") cfg.sweep_two_stage_cot = value;
+            else if (key == "sweep.dir_naming") cfg.sweep_dir_naming = value;
             else if (key == "sweep.repetitions") cfg.sweep_repetitions = std::stoi(value);
         }
     );

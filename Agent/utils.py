@@ -59,6 +59,7 @@ def prepare_gt_from_dataset(
     gt_csv_filename: str = "gt_data.csv",
     gt_results_filename: str = "gt_results.json",
     gt_text_filename: str = "gt_analysis.txt",
+    gt_vis_filename: str = "gt_vis.json",
 ) -> Dict[str, Optional[str]]:
     """Generate gt CSV/results files from dataset JSON for a prompt.
 
@@ -78,6 +79,7 @@ def prepare_gt_from_dataset(
     gt_csv_path = os.path.join(output_dir, gt_csv_filename)
     gt_results_path = os.path.join(output_dir, gt_results_filename)
     gt_text_path = None
+    gt_vis_path = None
 
     gt_rows = text_to_csv(gt_data)
     if gt_rows:
@@ -101,12 +103,60 @@ def prepare_gt_from_dataset(
         with open(gt_text_path, "w", encoding="utf-8") as f:
             f.write(gt_analysis)
 
+    gt_vis = case.get("gt_vis", None)
+    if isinstance(gt_vis, dict) and gt_vis:
+        gt_vis_path = os.path.join(output_dir, gt_vis_filename)
+        with open(gt_vis_path, "w", encoding="utf-8") as f:
+            json.dump(gt_vis, f, indent=2)
+
     return {
         "gt_csv_path": gt_csv_path,
         "gt_text_path": gt_text_path,
+        "gt_vis_path": gt_vis_path,
         "gt_results_path": gt_results_path,
         "case": case,
     }
+
+
+def viz_config_field_accuracy(
+    *,
+    predicted: Optional[Dict],
+    ground_truth: Optional[Dict],
+    keys: Optional[List[str]] = None,
+) -> Dict[str, float]:
+    """
+    Deterministic chart-config evaluation.
+
+    Compares a predicted chart config dict against a GT dict using exact matches
+    for a chosen subset of fields.
+    """
+    pred = predicted or {}
+    gt = ground_truth or {}
+    if not isinstance(pred, dict) or not isinstance(gt, dict) or not gt:
+        return {"score": 0.0}
+
+    keys = keys or ["chart_type", "x_axis", "y_axis"]
+
+    def norm(v):
+        if v is None:
+            return ""
+        if isinstance(v, (int, float)):
+            return str(v)
+        return str(v).strip()
+
+    matched = 0
+    total = 0
+    out: Dict[str, float] = {}
+    for k in keys:
+        if k not in gt:
+            continue
+        total += 1
+        ok = (norm(pred.get(k)) == norm(gt.get(k)))
+        out[f"{k}_ok"] = 1.0 if ok else 0.0
+        matched += 1 if ok else 0
+
+    out["score"] = (matched / total) if total > 0 else 0.0
+    return out
 
 def get_evaluation_functions(
     *,
@@ -166,9 +216,19 @@ def get_evaluation_functions(
             gt_csv_path = new_csv_path
         
         if py_csv_eval:
-            iou_type_map = {"columns": 0, "rows": 1, "table": 2}
-            iou_index = iou_type_map.get(iou_type, 1)  # Default to rows (1)
-            csv_eval_fn = lambda csv_path: compare_csv(csv_path, gt_csv_path)[iou_index]
+            def py_wrapper(csv_path: str):
+                cols_iou, rows_iou, cells_iou = compare_csv(csv_path, gt_csv_path)
+                report = {
+                    "columns_iou": float(cols_iou),
+                    "rows_iou": float(rows_iou),
+                    # "cells_iou" is the multiset IoU over all values (cell-level signal).
+                    "cells_iou": float(cells_iou),
+                }
+                metric_key_map = {"columns": "columns_iou", "rows": "rows_iou", "table": "cells_iou"}
+                metric_key = metric_key_map.get(iou_type, "rows_iou")
+                score = float(report.get(metric_key, 0.0) or 0.0)
+                return {"score": score, "metric_key": metric_key, "report": report}
+            csv_eval_fn = py_wrapper
         elif cpp_csv_eval:
             if evaluator_exe is None:
                 print("Cannot use --cpp_csv_eval because --evaluator-exe is not available") #TODO: make into warning
@@ -262,6 +322,21 @@ def get_evaluation_functions(
                 text_eval_fn = bleu_fn or spice_fn
     
     return csv_eval_fn, text_eval_fn
+
+
+def compare_csv_scores(csv1_path: str, csv2_path: str) -> Dict[str, float]:
+    """Return a standardized dict of CSV comparison scores.
+
+    - columns_iou: overlap of column sets
+    - rows_iou: row IoU (with column IoU factor as implemented in compare_csv)
+    - cells_iou: multiset IoU over all values (cell-level signal)
+    """
+    cols_iou, rows_iou, cells_iou = compare_csv(csv1_path, csv2_path)
+    return {
+        "columns_iou": float(cols_iou),
+        "rows_iou": float(rows_iou),
+        "cells_iou": float(cells_iou),
+    }
 
 def compare_csv(csv1_path, csv2_path):
     """
@@ -518,7 +593,7 @@ def spice_score_java(
     *,
     spice_jar: str,
     java_bin: str = "java",
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 300,
 ) -> float:
     """Compute SPICE score (0..1) by calling the official Java SPICE jar.
 
@@ -541,6 +616,34 @@ def spice_score_java(
         raise TypeError("reference and hypothesis must be strings")
     if not reference.strip() or not hypothesis.strip():
         return 0.0
+
+    # SPICE is designed for natural language captions; feeding it code/dicts can make the
+    # Stanford parser very slow (or appear to hang). For visualization outputs we often
+    # compare chart configs / code-like strings, so we sanitize those to keep SPICE stable.
+    def _looks_like_code(text: str) -> bool:
+        t = (text or "")
+        # Heuristics: braces/quotes/colon-heavy dicts, common plotting tokens, etc.
+        return (
+            ("{" in t and "}" in t)
+            or ("plt." in t)
+            or ("chart_type" in t)
+            or ("x_axis" in t)
+            or ("y_axis" in t)
+        )
+
+    def _sanitize_for_spice(text: str, max_len: int = 600) -> str:
+        # Keep only word-like tokens; collapse whitespace; clip length.
+        cleaned = re.sub(r"[^A-Za-z0-9]+", " ", text or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if len(cleaned) > max_len:
+            cleaned = cleaned[:max_len].rstrip()
+        return cleaned
+
+    if _looks_like_code(reference) or _looks_like_code(hypothesis):
+        reference = _sanitize_for_spice(reference)
+        hypothesis = _sanitize_for_spice(hypothesis)
+        if not reference or not hypothesis:
+            return 0.0
 
     # Use absolute paths to avoid cwd-related issues inside the Java tool
     spice_jar_abs = os.path.abspath(spice_jar)
