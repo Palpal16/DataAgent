@@ -918,9 +918,10 @@ class SalesDataAgent:
         temp_max: Optional[float] = None,
         csv_eval_fn: Optional[callable] = None,
         text_eval_fn: Optional[callable] = None,
-        viz_text_eval_fn: Optional[callable] = None,
+        gt_vis: Optional[dict] = None,
         save_dir: Optional[str] = None,
         llm_text_eval: bool = False,
+        emit_viz_placeholders: bool = False,
     ) -> Dict:
         """Core evaluation logic extracted from run() for CodeCarbon wrapping."""
         
@@ -953,11 +954,9 @@ class SalesDataAgent:
                     result_rows = text_to_csv(result['data'])
                     save_csv(result_rows, csv_path)
                 
-                # Extract analysis text
+                # Extract analysis text (first message)
                 analysis_text = result.get("answer", [None])[0] if result.get("answer") else None
-                viz_text = None
-                if result.get("answer") and isinstance(result.get("answer"), list) and len(result.get("answer")) >= 2:
-                    viz_text = result.get("answer", [None])[-1]
+                chart_cfg = result.get("chart_config", None)
                 
                 # Evaluate
                 score = 0.0
@@ -976,6 +975,24 @@ class SalesDataAgent:
                             result["csv_metric_key"] = csv_out.get("metric_key")
                         if "error" in csv_out:
                             result["csv_eval_error"] = csv_out.get("error")
+
+                        # Also store all CSV scores (columns/rows/cells) when available.
+                        rep = csv_out.get("report")
+                        if isinstance(rep, dict):
+                            if "columns_iou" in rep:
+                                result["csv_columns_iou"] = float(rep.get("columns_iou") or 0.0)
+                            if "rows_iou" in rep:
+                                result["csv_rows_iou"] = float(rep.get("rows_iou") or 0.0)
+                            # Python evaluator uses "cells_iou"; C++ uses "iou" for table-level.
+                            if "cells_iou" in rep:
+                                result["csv_cells_iou"] = float(rep.get("cells_iou") or 0.0)
+                            elif "iou" in rep:
+                                result["csv_cells_iou"] = float(rep.get("iou") or 0.0)
+                            result["csv_scores"] = {
+                                "columns_iou": float(result.get("csv_columns_iou", 0.0) or 0.0),
+                                "rows_iou": float(result.get("csv_rows_iou", 0.0) or 0.0),
+                                "cells_iou": float(result.get("csv_cells_iou", 0.0) or 0.0),
+                            }
                     else:
                         csv_score = float(csv_out or 0.0)
                         result["csv_score"] = csv_score
@@ -983,8 +1000,15 @@ class SalesDataAgent:
                 elif csv_path and save_dir:
                     gt_csv_path = os.path.join(save_dir, "gt_data.csv")
                     if os.path.exists(gt_csv_path):
-                        _, rows_iou, _ = compare_csv(csv_path, gt_csv_path)
-                        csv_score = rows_iou
+                        from Agent.utils import compare_csv_scores
+                        rep = compare_csv_scores(csv_path, gt_csv_path)
+                        result["csv_columns_iou"] = float(rep.get("columns_iou", 0.0) or 0.0)
+                        result["csv_rows_iou"] = float(rep.get("rows_iou", 0.0) or 0.0)
+                        result["csv_cells_iou"] = float(rep.get("cells_iou", 0.0) or 0.0)
+                        result["csv_scores"] = rep
+
+                        # Fallback: if no explicit evaluator is configured, use row IoU as the score.
+                        csv_score = float(result["csv_rows_iou"])
                         score += csv_score
                         result["csv_score"] = csv_score
                 
@@ -1006,33 +1030,20 @@ class SalesDataAgent:
                         score += float(text_score)
                         result["text_score"] = float(text_score)
 
-                # Visualization evaluation (only if we actually generated a chart/code and GT is provided)
-                if viz_text_eval_fn and viz_text:
-                    viz_score = None
-                    if llm_text_eval:
-                        viz_score = viz_text_eval_fn(
-                            generated_text=viz_text,
-                            prompt=result.get("prompt", ""),
-                            sql_query=result.get("sql_query", ""),
-                            data=result.get("data", ""),
-                        )
-                    else:
-                        viz_score = viz_text_eval_fn(viz_text)
-
-                    if isinstance(viz_score, dict):
-                        # Store prefixed component metrics (e.g., viz_bleu, viz_spice)
-                        result.setdefault("viz_text_scores", {})
-                        result["viz_text_scores"].update({k: float(v) for k, v in viz_score.items()})
-                        for k, v in viz_score.items():
-                            result[f"viz_{k}"] = float(v)
-                        vals = [float(v) for v in viz_score.values()] or [0.0]
-                        viz_score_scalar = float(sum(vals) / len(vals))
-                        result["viz_text_score"] = viz_score_scalar
-                        score += viz_score_scalar
-                    else:
-                        viz_score_scalar = float(viz_score or 0.0)
-                        result["viz_text_score"] = viz_score_scalar
-                        score += viz_score_scalar
+                # Visualization spec evaluation: compare predicted chart_config vs gt_vis (dict field accuracy)
+                if gt_vis and isinstance(gt_vis, dict) and chart_cfg and isinstance(chart_cfg, dict):
+                    try:
+                        from Agent.utils import viz_config_field_accuracy  # local import to avoid cycles
+                        rep = viz_config_field_accuracy(predicted=chart_cfg, ground_truth=gt_vis, keys=["chart_type", "x_axis", "y_axis"])
+                        result["viz_spec_report"] = rep
+                        result["viz_spec_score"] = float(rep.get("score", 0.0) or 0.0)
+                        score += float(result["viz_spec_score"])
+                    except Exception as e:
+                        result["viz_spec_error"] = str(e)
+                elif emit_viz_placeholders:
+                    # Keep schemas consistent even when viz eval is not applicable for this run.
+                    result.setdefault("viz_spec_report", None)
+                    result.setdefault("viz_spec_score", None)
                 
                 result["temperature"]= temps[i]
 
@@ -1080,10 +1091,11 @@ class SalesDataAgent:
         temp_max: Optional[float] = None,
         csv_eval_fn: Optional[callable] = None,
         text_eval_fn: Optional[callable] = None,
-        viz_text_eval_fn: Optional[callable] = None,
+        gt_vis: Optional[dict] = None,
         save_dir: Optional[str] = None,
         enable_codecarbon: bool = False,
         llm_text_eval: bool = False,
+        emit_viz_placeholders: bool = False,
     ) -> Dict:
         
         if save_dir is None:
@@ -1118,9 +1130,10 @@ class SalesDataAgent:
             temp_max=temp_max,
             csv_eval_fn=csv_eval_fn,
             text_eval_fn=text_eval_fn,
-            viz_text_eval_fn=viz_text_eval_fn,
+            gt_vis=gt_vis,
             save_dir=save_dir,
             llm_text_eval=llm_text_eval,
+            emit_viz_placeholders=emit_viz_placeholders,
         )
 
         # Stop tracker and attach total emissions + per-stage estimates (proportional to time).
@@ -1178,7 +1191,7 @@ if __name__ == "__main__":
     parser.add_argument("prompt", type=str, help="User prompt/question")
     parser.add_argument("--gt_csv", type=str, default=None, help="Path to ground-truth CSV file")
     parser.add_argument("--gt_text", type=str, default=None, help="Path to a text file containing the ground-truth")
-    parser.add_argument("--gt_visualization", type=str, default=None, help="Path to ground-truth visualization text/code (for chart evaluation)")
+    parser.add_argument("--gt_vis", type=str, default=None, help="Path to ground-truth visualization spec (JSON dict) for chart-config evaluation")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to save run results")
 
     parser.add_argument("--data", dest="data_path", type=str, default=DEFAULT_DATA_PATH, help="Path to parquet file")
@@ -1230,6 +1243,13 @@ if __name__ == "__main__":
 
     # CodeCarbon options
     parser.add_argument("--enable_codecarbon", action="store_true", help="Enable CodeCarbon energy/emissions tracking")
+
+    # Output shaping
+    parser.add_argument(
+        "--emit_viz_placeholders",
+        action="store_true",
+        help="Always include viz_spec_score/viz_spec_report keys in results (null if not applicable)",
+    )
     
     args = parser.parse_args()
 
@@ -1271,19 +1291,14 @@ if __name__ == "__main__":
         ollama_url=args.ollama_url,
     )
 
-    # Separate evaluator for visualization output (uses same metric flags, but different GT file).
-    _, viz_text_eval_fn = get_evaluation_functions(
-        lookup_only=args.lookup_only,
-        gt_text_path=args.gt_visualization,
-        spice_text_eval=args.spice_text_eval,
-        bleu_text_eval=args.bleu_text_eval,
-        bleu_nltk=args.bleu_nltk,
-        spice_jar=args.spice_jar,
-        spice_java_bin=args.spice_java_bin,
-        llm_text_eval=args.llm_text_eval,
-        llm_judge_model=args.llm_judge_model,
-        ollama_url=args.ollama_url,
-    )
+    gt_vis_obj = None
+    if args.gt_vis:
+        try:
+            with open(args.gt_vis, "r", encoding="utf-8") as f:
+                gt_vis_obj = json.load(f)
+        except Exception as e:
+            print(f"[Viz Eval] Failed to read gt_vis JSON: {e}")
+            gt_vis_obj = None
 
     # Run agent
     output, score_variance = agent.run(
@@ -1296,8 +1311,9 @@ if __name__ == "__main__":
         temp_max=args.temp_max,
         csv_eval_fn=csv_eval_fn,
         text_eval_fn=text_eval_fn,
-        viz_text_eval_fn=viz_text_eval_fn,
+        gt_vis=gt_vis_obj,
         save_dir=args.save_dir,
         enable_codecarbon=args.enable_codecarbon,
-        llm_text_eval=args.llm_text_eval
+        llm_text_eval=args.llm_text_eval,
+        emit_viz_placeholders=args.emit_viz_placeholders,
     )

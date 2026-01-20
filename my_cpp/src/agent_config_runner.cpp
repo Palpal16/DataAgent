@@ -269,6 +269,56 @@ static std::vector<std::string> parse_string_list_allow_null(const std::string& 
     return out;
 }
 
+static std::vector<bool> parse_bool_list(const std::string& s, bool fallback) {
+    if (s.empty()) return {fallback};
+    std::vector<bool> out;
+    for (const auto& tok0 : split_csv_list(s)) {
+        std::string tok = tok0;
+        std::transform(tok.begin(), tok.end(), tok.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        if (tok == "true" || tok == "1" || tok == "yes" || tok == "y" || tok == "on") out.push_back(true);
+        else if (tok == "false" || tok == "0" || tok == "no" || tok == "n" || tok == "off") out.push_back(false);
+    }
+    if (out.empty()) out.push_back(fallback);
+    return out;
+}
+
+static std::string sweep_setting_dirname(int rep, bool two_stage, int best_of_n, double temp, const std::string& tmax) {
+    auto norm_num = [](double v) {
+        std::ostringstream oss;
+        oss.setf(std::ios::fixed);
+        oss.precision(3);
+        oss << v;
+        std::string s = oss.str();
+        // trim trailing zeros and trailing dot
+        while (!s.empty() && s.back() == '0') s.pop_back();
+        if (!s.empty() && s.back() == '.') s.pop_back();
+        if (s.empty()) s = "0";
+        // filesystem-safe: 0.3 -> 0p3, -0.1 -> m0p1
+        for (char& c : s) {
+            if (c == '-') c = 'm';
+            else if (c == '.') c = 'p';
+        }
+        return s;
+    };
+
+    std::string tmax_s = tmax;
+    if (tmax_s.empty() || tmax_s == "null") tmax_s = "null";
+    // sanitize tmax similarly (it's a string in config)
+    for (char& c : tmax_s) {
+        if (c == '-') c = 'm';
+        else if (c == '.') c = 'p';
+        else if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' )) c = '_';
+    }
+
+    std::ostringstream oss;
+    oss << "rep" << rep
+        << "_ts" << (two_stage ? "true" : "false")
+        << "_bon" << best_of_n
+        << "_t" << norm_num(temp)
+        << "_tmax" << tmax_s;
+    return oss.str();
+}
+
 static bool extract_json_number(const std::string& json_text, const std::string& key, double& out) {
     const std::string needle = "\"" + key + "\"";
     size_t pos = json_text.find(needle);
@@ -300,6 +350,8 @@ static void append_sweep_row(
     int repetition,
     int test_case_idx,
     const std::string& prompt,
+    const std::string& difficulty,
+    bool two_stage_cot,
     int best_of_n,
     double temperature,
     const std::string& temperature_max,
@@ -307,30 +359,58 @@ static void append_sweep_row(
     const std::string& test_dir
 ) {
     namespace fs = std::filesystem;
-    const bool exists = fs::exists(csv_path);
+    bool exists = fs::exists(csv_path);
+
+    // If an older CSV exists with a different header, rotate it to avoid mixing schemas.
+    const std::string expected_prefix =
+        "sweep_id,repetition,test_case,prompt,difficulty,two_stage_cot,best_of_n,temperature,temperature_max,";
+    if (exists) {
+        std::ifstream in(csv_path, std::ios::binary);
+        std::string first_line;
+        if (in.is_open() && std::getline(in, first_line)) {
+            // Strip a possible UTF-8 BOM (rare but can happen on Windows)
+            if (first_line.size() >= 3 &&
+                static_cast<unsigned char>(first_line[0]) == 0xEF &&
+                static_cast<unsigned char>(first_line[1]) == 0xBB &&
+                static_cast<unsigned char>(first_line[2]) == 0xBF) {
+                first_line = first_line.substr(3);
+            }
+            if (first_line.rfind(expected_prefix, 0) != 0) {
+                const std::string rotated = csv_path + ".bak";
+                try {
+                    if (fs::exists(rotated)) fs::remove(rotated);
+                    fs::rename(csv_path, rotated);
+                    exists = false;
+                } catch (...) {
+                    // If rotation fails, we keep appending (best-effort).
+                }
+            }
+        }
+    }
+
     std::ofstream out(csv_path, std::ios::binary | std::ios::app);
     if (!out.is_open()) {
         std::cerr << "[ConfigRunner] Warning: failed to write sweep CSV: " << csv_path << std::endl;
         return;
     }
     if (!exists) {
-        out << "sweep_id,repetition,test_case,prompt,best_of_n,temperature,temperature_max,"
-               "csv_score,bleu,spice,text_score,viz_bleu,viz_spice,viz_text_score,best_score,duration_ms,total_emissions_kg,test_dir\n";
+        out << "sweep_id,repetition,test_case,prompt,difficulty,two_stage_cot,best_of_n,temperature,temperature_max,"
+               "csv_score,csv_columns_iou,csv_rows_iou,csv_cells_iou,text_score,viz_spec_score,best_score,duration_ms,total_emissions_kg,test_dir\n";
     }
 
-    double csv_score = 0.0, text_score = 0.0, best_score = 0.0, bleu = 0.0, spice = 0.0;
-    double viz_bleu = 0.0, viz_spice = 0.0, viz_text_score = 0.0, emissions = 0.0;
+    double csv_score = 0.0, text_score = 0.0, best_score = 0.0;
+    double csv_columns_iou = 0.0, csv_rows_iou = 0.0, csv_cells_iou = 0.0;
+    double viz_spec_score = 0.0, emissions = 0.0;
     const std::string best_path = test_dir + "/best_result.json";
     const std::string best_txt = read_file_to_string(best_path);
     if (!best_txt.empty()) {
         extract_json_number(best_txt, "csv_score", csv_score);
+        extract_json_number(best_txt, "csv_columns_iou", csv_columns_iou);
+        extract_json_number(best_txt, "csv_rows_iou", csv_rows_iou);
+        extract_json_number(best_txt, "csv_cells_iou", csv_cells_iou);
         extract_json_number(best_txt, "text_score", text_score);
         extract_json_number(best_txt, "best_score", best_score);
-        extract_json_number(best_txt, "bleu", bleu);
-        extract_json_number(best_txt, "spice", spice);
-        extract_json_number(best_txt, "viz_bleu", viz_bleu);
-        extract_json_number(best_txt, "viz_spice", viz_spice);
-        extract_json_number(best_txt, "viz_text_score", viz_text_score);
+        extract_json_number(best_txt, "viz_spec_score", viz_spec_score);
         extract_json_number(best_txt, "total_emissions_kg", emissions);
     }
 
@@ -338,16 +418,17 @@ static void append_sweep_row(
         << repetition << ","
         << test_case_idx << ","
         << csv_escape(prompt) << ","
+        << csv_escape(difficulty) << ","
+        << (two_stage_cot ? "true" : "false") << ","
         << best_of_n << ","
         << temperature << ","
         << csv_escape(temperature_max) << ","
         << csv_score << ","
-        << bleu << ","
-        << spice << ","
+        << csv_columns_iou << ","
+        << csv_rows_iou << ","
+        << csv_cells_iou << ","
         << text_score << ","
-        << viz_bleu << ","
-        << viz_spice << ","
-        << viz_text_score << ","
+        << viz_spec_score << ","
         << best_score << ","
         << duration_ms << ","
         << emissions << ","
@@ -385,7 +466,7 @@ pid_t start_phoenix(const RunnerConfig& cfg) {
 }
 
 std::string build_command(const RunnerConfig& cfg, const std::string& prompt = "",
-                         const std::string& gt_csv = "", const std::string& gt_text = "", const std::string& gt_visualization = "") {
+                         const std::string& gt_csv = "", const std::string& gt_text = "", const std::string& gt_vis = "") {
     runner_common::AgentCliConfig c;
     c.prompt = cfg.prompt;
     c.data_path = cfg.data_path;
@@ -400,7 +481,7 @@ std::string build_command(const RunnerConfig& cfg, const std::string& prompt = "
     c.save_dir = cfg.save_dir;
     c.gt_csv = cfg.gt_csv;
     c.gt_text = cfg.gt_text;
-    c.gt_visualization = cfg.gt_visualization;
+    c.gt_vis = cfg.gt_vis;
     c.enable_csv_eval = cfg.enable_csv_eval;
     c.csv_eval_method = cfg.csv_eval_method;
     c.csv_iou_type = cfg.csv_iou_type;
@@ -423,7 +504,8 @@ std::string build_command(const RunnerConfig& cfg, const std::string& prompt = "
     c.cot_max_bullets = cfg.cot_max_bullets;
     c.cot_print_plan = cfg.cot_print_plan;
     c.cot_store_plan = cfg.cot_store_plan;
-    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text, gt_visualization);
+    c.emit_viz_placeholders = cfg.emit_viz_placeholders;
+    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text, gt_vis);
 }
 
 int write_file(const std::string& filepath, const std::string& content) {
@@ -586,12 +668,14 @@ int main(int argc, char** argv) {
         const auto bon_list = parse_int_list(cfg.sweep_best_of_n, cfg.best_of_n);
         const auto temp_list = parse_double_list(cfg.sweep_temperature, cfg.temperature);
         const auto tmax_list = parse_string_list_allow_null(cfg.sweep_temperature_max, cfg.temperature_max);
+        const auto ts_list = parse_bool_list(cfg.sweep_two_stage_cot, cfg.two_stage_cot);
         const int reps = std::max(1, cfg.sweep_repetitions);
 
         const std::string sweep_csv = (cfg.save_dir.empty() ? "./output" : cfg.save_dir) + "/sweep_results.csv";
 
         int sweep_id = 0;
         for (int rep = 1; rep <= reps; ++rep) {
+            for (bool ts : ts_list) {
             for (int bon : bon_list) {
                 for (double t : temp_list) {
                     for (const auto& tmax : tmax_list) {
@@ -599,13 +683,19 @@ int main(int argc, char** argv) {
                         std::cout << "\n" << std::string(80, '=') << std::endl;
                         std::cout << "[Sweep] setting " << sweep_id
                                   << " | rep=" << rep
+                                  << " | two_stage_cot=" << (ts ? "true" : "false")
                                   << " | best_of_n=" << bon
                                   << " | temp=" << t
                                   << " | temp_max=" << (tmax.empty() ? "null" : tmax)
                                   << std::endl;
 
                         // For each sweep setting, create a dedicated folder to avoid overwriting outputs.
-                        const std::string sweep_root = (cfg.save_dir.empty() ? "./output" : cfg.save_dir) + "/sweep_" + std::to_string(sweep_id);
+                        const std::string base_dir = (cfg.save_dir.empty() ? "./output" : cfg.save_dir);
+                        std::string sweep_folder = "sweep_" + std::to_string(sweep_id);
+                        if (cfg.sweep_dir_naming == "config") {
+                            sweep_folder = sweep_setting_dirname(rep, ts, bon, t, (tmax == "null" ? "" : tmax));
+                        }
+                        const std::string sweep_root = base_dir + "/" + sweep_folder;
                         std::filesystem::create_directories(sweep_root);
 
                         for (size_t i = 0; i < test_cases.size(); ++i) {
@@ -613,7 +703,7 @@ int main(int argc, char** argv) {
                             std::filesystem::create_directories(test_dir);
 
                             // Write per-test GT artifacts
-                            std::string gt_csv_file, gt_text_file, gt_vis_file;
+                            std::string gt_csv_file, gt_text_file, gt_vis_json_file;
                             if (!test_cases[i].gt_data.empty()) {
                                 gt_csv_file = test_dir + "/gt_data.csv";
                                 auto rows = text_table_to_rows(test_cases[i].gt_data);
@@ -624,18 +714,19 @@ int main(int argc, char** argv) {
                                 gt_text_file = test_dir + "/gt_analysis.txt";
                                 write_file(gt_text_file, test_cases[i].gt_analysis);
                             }
-                            if (!test_cases[i].gt_visualization.empty()) {
-                                gt_vis_file = test_dir + "/gt_visualization.txt";
-                                write_file(gt_vis_file, test_cases[i].gt_visualization);
+                            if (!test_cases[i].gt_vis_json.empty()) {
+                                gt_vis_json_file = test_dir + "/gt_vis.json";
+                                write_file(gt_vis_json_file, test_cases[i].gt_vis_json);
                             }
 
                             RunnerConfig run_cfg = cfg;
                             run_cfg.save_dir = test_dir;
+                            run_cfg.two_stage_cot = ts;
                             run_cfg.best_of_n = bon;
                             run_cfg.temperature = t;
                             run_cfg.temperature_max = (tmax == "null" ? "" : tmax);
 
-                            const std::string cmd = build_command(run_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file, gt_vis_file);
+                            const std::string cmd = build_command(run_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file, gt_vis_json_file);
                             std::cout << "[Sweep] Executing: " << cmd << std::endl;
                             const auto t0 = std::chrono::steady_clock::now();
                             int rc = system(cmd.c_str());
@@ -650,6 +741,8 @@ int main(int argc, char** argv) {
                                 rep,
                                 static_cast<int>(i + 1),
                                 test_cases[i].prompt,
+                                test_cases[i].difficulty,
+                                ts,
                                 bon,
                                 t,
                                 (tmax == "null" ? "" : tmax),
@@ -671,6 +764,7 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+            }
             }
         }
 
@@ -707,7 +801,7 @@ int main(int argc, char** argv) {
                 continue;  // Skip this test case
             }
 
-            std::string gt_csv_file, gt_text_file, gt_vis_file;
+            std::string gt_csv_file, gt_text_file, gt_vis_json_file;
 
             if (!test_cases[i].gt_data.empty()) {
                 gt_csv_file = save_dir + "/gt_data.csv";
@@ -733,10 +827,10 @@ int main(int argc, char** argv) {
                     continue;
                 }
             }
-            if (!test_cases[i].gt_visualization.empty()) {
-                gt_vis_file = save_dir + "/gt_visualization.txt";
-                if (write_file(gt_vis_file, test_cases[i].gt_visualization)!= 0) {
-                    std::cerr << "[ConfigRunner] Failed to create temp visualization GT file" << std::endl;
+            if (!test_cases[i].gt_vis_json.empty()) {
+                gt_vis_json_file = save_dir + "/gt_vis.json";
+                if (write_file(gt_vis_json_file, test_cases[i].gt_vis_json)!= 0) {
+                    std::cerr << "[ConfigRunner] Failed to create gt_vis.json file" << std::endl;
                     fail_count++;
                     continue;
                 }
@@ -745,7 +839,7 @@ int main(int argc, char** argv) {
             RunnerConfig test_cfg = cfg;
             test_cfg.save_dir = save_dir;
 
-            std::string cmd = build_command(test_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file, gt_vis_file);
+            std::string cmd = build_command(test_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file, gt_vis_json_file);
 
             std::cout << "[ConfigRunner] Executing: " << cmd << std::endl;
             long long duration_ms = 0;

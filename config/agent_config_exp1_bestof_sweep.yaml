@@ -50,6 +50,9 @@ spice:
 llm_judge:
   model: null
 
+# Always include viz_spec_* keys in results (null if not applicable)
+emit_viz_placeholders: true
+
 # Batch dataset
 test_cases_json: ./evaluation/our_dataset_test.json
 run_batch: true
@@ -57,9 +60,11 @@ run_batch: true
 # Sweep settings
 sweep:
   enabled: true
+  two_stage_cot: "false,true"
   best_of_n: "1,2,3"
   temperature: "0.3"
   temperature_max: "0.3"
+  dir_naming: "config"   # "id" -> sweep_1, "config" -> rep1_tsfalse_bon2_t0p3_tmax0p3
   repetitions: 3
 
 enable_tracing: false

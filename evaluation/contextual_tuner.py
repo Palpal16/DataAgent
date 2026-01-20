@@ -1,8 +1,6 @@
 import argparse
 import json
 import os
-import re
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -66,12 +64,6 @@ def make_context_bucket(prompt: str, *, difficulty: Optional[str] = None) -> str
     lb = _length_bucket(prompt)
     diff = (difficulty or "unknown").lower()
     return f"task={task}|len={lb}|difficulty={diff}"
-
-
-@dataclass(frozen=True)
-class Action:
-    best_of_n: int
-    two_stage_cot: bool
 
 
 def _extract_actions(df: pd.DataFrame) -> pd.DataFrame:

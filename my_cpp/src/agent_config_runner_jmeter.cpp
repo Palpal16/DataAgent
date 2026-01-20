@@ -84,6 +84,7 @@ public:
         std::string phoenix_api_key;
         bool phoenix_auto_start;
         bool enable_codecarbon;
+        bool emit_viz_placeholders;
         bool use_jmeter;
         std::string jmeter_bin;
         std::string jmx_folder;
@@ -104,6 +105,7 @@ public:
         cfg.enable_tracing = false;
         cfg.phoenix_auto_start = true;
         cfg.enable_codecarbon = false;
+        cfg.emit_viz_placeholders = false;
         cfg.use_jmeter = false;
         cfg.jmeter_auto_start_api = true;
         cfg.model = "llama3.2:3b";
@@ -193,6 +195,7 @@ public:
                 else if (key == "phoenix.api_key") cfg.phoenix_api_key = value;
                 else if (key == "phoenix.auto_start") cfg.phoenix_auto_start = (value == "true");
                 else if (key == "enable_codecarbon") cfg.enable_codecarbon = (value == "true");
+                else if (key == "emit_viz_placeholders") cfg.emit_viz_placeholders = (value == "true");
                 else if (key == "use_jmeter") cfg.use_jmeter = (value == "true");
                 else if (key == "jmeter.bin") cfg.jmeter_bin = value;
                 else if (key == "jmeter.jmx_folder") cfg.jmx_folder = value;
@@ -484,7 +487,7 @@ int run_jmeter(const SimpleYAML::Config& cfg) {
 }
 
 std::string build_command(const SimpleYAML::Config& cfg, const std::string& prompt = "",
-                         const std::string& gt_csv = "", const std::string& gt_text = "", const std::string& gt_visualization = "") {
+                         const std::string& gt_csv = "", const std::string& gt_text = "", const std::string& gt_vis = "") {
     runner_common::AgentCliConfig c;
     c.prompt = cfg.prompt;
     c.data_path = cfg.data_path;
@@ -499,7 +502,7 @@ std::string build_command(const SimpleYAML::Config& cfg, const std::string& prom
     c.save_dir = cfg.save_dir;
     c.gt_csv = cfg.gt_csv;
     c.gt_text = cfg.gt_text;
-    c.gt_visualization = "";
+    c.gt_vis = "";
     c.enable_csv_eval = cfg.enable_csv_eval;
     c.csv_eval_method = cfg.csv_eval_method;
     c.csv_iou_type = cfg.csv_iou_type;
@@ -515,7 +518,8 @@ std::string build_command(const SimpleYAML::Config& cfg, const std::string& prom
     c.phoenix_endpoint = cfg.phoenix_endpoint;
     c.phoenix_project_name = cfg.phoenix_project_name;
     c.enable_codecarbon = cfg.enable_codecarbon;
-    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text, gt_visualization);
+    c.emit_viz_placeholders = cfg.emit_viz_placeholders;
+    return runner_common::build_agent_command(c, prompt, gt_csv, gt_text, gt_vis);
 }
 
 int write_file(const std::string& filepath, const std::string& content) {

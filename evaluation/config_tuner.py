@@ -2,19 +2,9 @@ import argparse
 import json
 import os
 import re
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import pandas as pd
-
-
-@dataclass(frozen=True)
-class ConfigKey:
-    best_of_n: int
-    temperature: float
-    temperature_max: str
-    two_stage_cot: Optional[bool] = None
-
 
 def _repair_concatenated_sweep_csv_text(text: str) -> str:
     """

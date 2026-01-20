@@ -19,7 +19,7 @@ struct Config {
     std::string save_dir;
     std::string gt_csv;
     std::string gt_text;
-    std::string gt_visualization;
+    std::string gt_vis;
 
     bool enable_csv_eval = false;
     std::string csv_eval_method = "python";
@@ -54,11 +54,16 @@ struct Config {
     bool cot_print_plan = false;
     bool cot_store_plan = false;
 
+    // Output shaping
+    bool emit_viz_placeholders = false;
+
     // Sweep (parameter grid)
     bool sweep_enabled = false;
     std::string sweep_best_of_n;       // e.g. "1,2,3,5"
     std::string sweep_temperature;     // e.g. "0.0,0.1"
     std::string sweep_temperature_max; // e.g. "0.6" (or "null")
+    std::string sweep_two_stage_cot;   // e.g. "false,true"
+    std::string sweep_dir_naming = "id"; // "id" -> sweep_1, "config" -> rep1_tsfalse_bon2_t0p3_tmax0p3
     int sweep_repetitions = 1;
 };
 
