@@ -888,7 +888,10 @@ class SalesDataAgent:
                 with self.tracer.start_as_current_span("AgentRun", openinference_span_kind="agent") as span:  # type: ignore[attr-defined]
                     print("[LangGraph] Starting LangGraph execution with tracing")
                     span.set_input(state)  # type: ignore[attr-defined]
-                    result = self.graph.invoke(state)
+                    result = self.graph.invoke(
+                        state,
+                        config={"recursion_limit": 3},
+                    )
                     print(f"\nAgent response: {result.get('answer', [])}")
                     span.set_output(result)  # type: ignore[attr-defined]
                     if StatusCode is not None:
@@ -897,12 +900,18 @@ class SalesDataAgent:
                     return result
             except Exception:
                 # Fallback to non-traced execution on any tracing error
-                result = self.graph.invoke(state)
+                result = self.graph.invoke(
+                    state,
+                    config={"recursion_limit": 3},
+                )
                 print(f"\nAgent response: {result.get('answer', [])}")
                 return result
         else:
             print("[LangGraph] Starting LangGraph execution")
-            result = self.graph.invoke(state)
+            result = self.graph.invoke(
+                state,
+                config={"recursion_limit": 3},
+            )
             print("[LangGraph] LangGraph execution completed")
             return result
     
