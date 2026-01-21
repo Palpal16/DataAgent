@@ -264,11 +264,34 @@ def _invoke_llm(
     resp = llm.invoke(prompt)
     return resp.content if hasattr(resp, "content") else str(resp)
 
-SQL_GENERATION_PROMPT = """Generate an SQL query based on the prompt.
-Please just reply with the SQL query and NO MORE, just the query.
-The prompt is : {prompt}. The available columns are: {columns}. The table name is: {table_name}.
-If you need to use a DATE column with LIKE or pattern matching, first CAST it to VARCHAR like this: CAST(date_column AS VARCHAR) LIKE '%2021-11%'.
-Return only the SQL query, with no explanations or markdown formatting.
+SQL_GENERATION_PROMPT = """Generate a DuckDB SQL query that answers the prompt.
+Please reply with the SQL query and NOTHING ELSE (no markdown, no explanation).
+
+Prompt: {prompt}
+Table: {table_name}
+Available columns: {columns}
+
+General rules:
+- Use ONLY columns that exist in the table.
+- Prefer simple, correct SQL (avoid unnecessary subqueries).
+- If the prompt requests ordering, sorting, limiting, tie-breaks, or specific columns, implement them explicitly.
+
+DuckDB date/time rules (IMPORTANT, general):
+- DuckDB date functions require DATE/TIMESTAMP inputs.
+- Do NOT call date functions on strings (e.g., month(VARCHAR), EXTRACT(... FROM VARCHAR), DATE_TRUNC(..., VARCHAR)).
+- If you need year/month/day logic on a date-like column (often named with "date"), CAST it first:
+  - EXTRACT(YEAR FROM CAST(col AS DATE))
+  - DATE_TRUNC('month', CAST(col AS DATE))
+- Do NOT use LIKE/ILIKE on DATE/TIMESTAMP directly (LIKE works on strings only).
+  - Prefer date ranges for months:
+    col >= DATE 'YYYY-MM-01' AND col < DATE 'YYYY-MM-01' + INTERVAL '1 month'
+    (or use an explicit next-month boundary like DATE 'YYYY-(MM+1)-01')
+  - If you truly need pattern matching, CAST only for the LIKE clause:
+    CAST(col AS VARCHAR) LIKE '%YYYY-MM%'
+    and do NOT feed that VARCHAR into date functions.
+
+Output format:
+- Return a single SQL statement (no code fences).
 """
 
 
@@ -420,12 +443,14 @@ def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
     - Answer so far: {state.get('answer', [])}
     - Visualization goal: {state.get('visualization_goal')}
     - Tool used last: {state.get('tool_choice')}
+    - Last error (if any): {state.get('error')}
     Decide the next tool among: lookup_sales_data, analyzing_data, create_visualization.
     Respond with only the tool name, or 'end'.
     Keep in mind:
     - Do NOT reuse a tool that was already used earlier in the conversation.
     - If analysis and visualization are both completed, respond with "end".
     - If all relevant tools for the prompt have been used, respond with "end".
+    - If the last step produced an error (especially SQL/data access errors), respond with "end" (do NOT retry).
     """
 
     try:
@@ -449,6 +474,9 @@ def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
         if matched_tool in ["analyzing_data", "create_visualization"] and not state.get("data"):
             matched_tool = "lookup_sales_data"
         elif len(state.get("answer", [])) > 1:
+            matched_tool = "end"
+        elif state.get("error"):
+            # Avoid infinite tool loops when the previous step failed (common with SQL binder errors).
             matched_tool = "end"
 
         # Tracing span for tool choice (optional)
@@ -890,7 +918,7 @@ class SalesDataAgent:
                     span.set_input(state)  # type: ignore[attr-defined]
                     result = self.graph.invoke(
                         state,
-                        config={"recursion_limit": 3},
+                        config={"recursion_limit": 30},
                     )
                     print(f"\nAgent response: {result.get('answer', [])}")
                     span.set_output(result)  # type: ignore[attr-defined]
@@ -902,7 +930,7 @@ class SalesDataAgent:
                 # Fallback to non-traced execution on any tracing error
                 result = self.graph.invoke(
                     state,
-                    config={"recursion_limit": 3},
+                    config={"recursion_limit": 30},
                 )
                 print(f"\nAgent response: {result.get('answer', [])}")
                 return result
@@ -910,7 +938,7 @@ class SalesDataAgent:
             print("[LangGraph] Starting LangGraph execution")
             result = self.graph.invoke(
                 state,
-                config={"recursion_limit": 3},
+                config={"recursion_limit": 30},
             )
             print("[LangGraph] LangGraph execution completed")
             return result
