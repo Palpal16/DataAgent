@@ -890,7 +890,7 @@ class SalesDataAgent:
                     span.set_input(state)  # type: ignore[attr-defined]
                     result = self.graph.invoke(
                         state,
-                        config={"recursion_limit": 3},
+                        config={"recursion_limit": 30},
                     )
                     print(f"\nAgent response: {result.get('answer', [])}")
                     span.set_output(result)  # type: ignore[attr-defined]
@@ -902,7 +902,7 @@ class SalesDataAgent:
                 # Fallback to non-traced execution on any tracing error
                 result = self.graph.invoke(
                     state,
-                    config={"recursion_limit": 3},
+                    config={"recursion_limit": 30},
                 )
                 print(f"\nAgent response: {result.get('answer', [])}")
                 return result
@@ -910,7 +910,7 @@ class SalesDataAgent:
             print("[LangGraph] Starting LangGraph execution")
             result = self.graph.invoke(
                 state,
-                config={"recursion_limit": 3},
+                config={"recursion_limit": 30},
             )
             print("[LangGraph] LangGraph execution completed")
             return result
