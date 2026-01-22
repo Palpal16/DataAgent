@@ -471,12 +471,13 @@ def decide_tool(state: State, llm: ChatOllama, tracer=None) -> State:
         closest_match = difflib.get_close_matches(tool_choice, valid_tools, n=1, cutoff=0.6)
         matched_tool = closest_match[0] if closest_match else "lookup_sales_data"
 
-        if matched_tool in ["analyzing_data", "create_visualization"] and not state.get("data"):
+        # IMPORTANT: error must take absolute priority.
+        # Otherwise, the "no data -> force lookup" rule can override the error and cause infinite retry loops.
+        if state.get("error"):
+            matched_tool = "end"
+        elif matched_tool in ["analyzing_data", "create_visualization"] and not state.get("data"):
             matched_tool = "lookup_sales_data"
         elif len(state.get("answer", [])) > 1:
-            matched_tool = "end"
-        elif state.get("error"):
-            # Avoid infinite tool loops when the previous step failed (common with SQL binder errors).
             matched_tool = "end"
 
         # Tracing span for tool choice (optional)
@@ -664,6 +665,8 @@ def route_to_tool(state: State) -> str:
     Returns:
         One of: 'lookup_sales_data' | 'analyzing_data' | 'create_visualization' | 'end'.
     """
+    if state.get("error"):
+        return "end"
     tool_choice = state.get("tool_choice", "lookup_sales_data")
     valid_tools = ["lookup_sales_data", "analyzing_data", "create_visualization", "end"]
     return tool_choice if tool_choice in valid_tools else "end"
@@ -1001,7 +1004,19 @@ class SalesDataAgent:
                 text_score = None
                 
                 if csv_eval_fn:
-                    csv_out = csv_eval_fn(csv_path)
+                    if not csv_path:
+                        # SQL/data access failed → no CSV produced.
+                        csv_score = 0.0
+                        result["csv_score"] = 0.0
+                        result["csv_eval_error"] = "No run_data.csv produced (empty result data); skipping CSV evaluation."
+                        result.setdefault("csv_scores", {"columns_iou": 0.0, "rows_iou": 0.0, "cells_iou": 0.0})
+                        result["csv_columns_iou"] = float(result["csv_scores"]["columns_iou"])
+                        result["csv_rows_iou"] = float(result["csv_scores"]["rows_iou"])
+                        result["csv_cells_iou"] = float(result["csv_scores"]["cells_iou"])
+                        score += 0.0
+                        csv_out = None
+                    else:
+                        csv_out = csv_eval_fn(csv_path)
                     if isinstance(csv_out, dict):
                         csv_score = float(csv_out.get("score", 0.0) or 0.0)
                         result["csv_score"] = csv_score
