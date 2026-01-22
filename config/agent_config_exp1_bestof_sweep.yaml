@@ -13,8 +13,8 @@ model: "llama3.2:3b"
 ollama_url: "http://localhost:11434"
 
 # Fixed temperature for all runs in this experiment
-temperature: 0.3
-temperature_max: "0.3"
+temperature: 0
+temperature_max: "0"
 
 agent_mode: "analysis"
 
@@ -54,7 +54,7 @@ llm_judge:
 emit_viz_placeholders: true
 
 # Batch dataset
-test_cases_json: ./evaluation/our_dataset_test.json
+test_cases_json: ./evaluation/miguel.json
 run_batch: true
 
 # Sweep settings
@@ -62,8 +62,8 @@ sweep:
   enabled: true
   two_stage_cot: "false,true"
   best_of_n: "1,2,3"
-  temperature: "0.3"
-  temperature_max: "0.3"
+  temperature: "0"
+  temperature_max: "0"
   dir_naming: "config"   # "id" -> sweep_1, "config" -> rep1_tsfalse_bon2_t0p3_tmax0p3
   repetitions: 3
 
