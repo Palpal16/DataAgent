@@ -12,8 +12,8 @@
     {
         "prompt": "How many units we sold in september 2022 ?",
         "gt_sql": "SELECT SUM(Qty_Sold) as Total_Units FROM sales WHERE Sold_Date >= DATE '2022-09-01' AND Sold_Date < DATE '2022-10-01'",
-        "gt_data": "Total_Units\n35099",
-        "gt_analysis": "The total units sold in september 2022 is 35,099.",
+        "gt_data": "Total_Units\n32153.0",
+        "gt_analysis": "The total units sold in september 2022 is 32,153.0.",
         "visualization" : false,
         "gt_vis" : null,
         "difficulty": "easy"
@@ -37,11 +37,20 @@
         "difficulty": "easy-medium"
     },
     {
+        "prompt": "Which store has the most sales in october 2022 ?",
+        "gt_sql": "SELECT Store_Number, SUM(Total_Sale_Value) as Total_Sale FROM sales WHERE Sold_Date >= DATE '2022-10-01' AND Sold_Date < DATE '2022-11-01' GROUP BY Store_Number ORDER BY Total_Sale DESC LIMIT 1",
+        "gt_data": "Store_Number  Total_Sale\n2970  27922.329905",
+        "gt_analysis": "The store with the most sales in october 2022 is 2970 with \u20ac27,922.33.",
+        "visualization" : false,
+        "gt_vis" : null,
+        "difficulty": "easy"
+    },
+    {
         "prompt": "List top 10 stores by average transaction value during December 2021",
         "gt_sql": "SELECT Store_Number, AVG(Total_Sale_Value) as Average_Transaction_Value FROM sales WHERE Sold_Date >= DATE '2021-12-01' AND Sold_Date < DATE '2022-01-01' GROUP BY Store_Number ORDER BY Average_Transaction_Value DESC LIMIT 10",
         "gt_data": "Store_Number  Average_Transaction_Value\n4400  42.095486\n2970  29.879128\n1210  24.459097\n2750  23.893291\n2200  23.773117\n1650  23.473205\n1540  23.364011\n880  23.354056\n990  23.293025\n3300  23.179454",
         "gt_analysis": "The top 10 stores by average transaction value during December 2021 are: 4400 with \u20ac42.09, 2970 with \u20ac29.88, 1210 with \u20ac24.46, 2750 with \u20ac23.89, 2200 with \u20ac23.77, 1650 with \u20ac23.47, 1540 with \u20ac23.36, 880 with \u20ac23.35, 990 with \u20ac23.29, 3300 with \u20ac23.18.",
-        "visualization" : true,
+        "visualization" : false,
         "gt_vis" : null,
         "difficulty": "medium"
     },
@@ -72,8 +81,8 @@
     {
         "prompt": "Give me by SKU level the top 3 products in January 2022",
         "gt_sql": "SELECT SKU_Coded, Product_Class_Code, SUM(Total_Sale_Value) as Total_Revenue FROM sales WHERE Sold_Date >= DATE '2022-01-01' AND Sold_Date < DATE '2022-02-01' GROUP BY Product_Class_Code, SKU_Coded ORDER BY Total_Revenue DESC LIMIT 3",
-        "gt_data": "SKU_Coded Product_Class_Code Total_Revenue\n22975 22975 109375.060213\n22800 22800 64642.269269\n24400 24400 58709.359028",
-        "gt_analysis": "The top 3 products in January 2022 are: 22975 with \u20ac109,375.06, 22800 with \u20ac64,642.27, 24400 with \u20ac58,709.36.",
+        "gt_data": "SKU_Coded Product_Class_Code Total_Revenue\n0 6184900 24400 12054.159729\n1 6194250 22975 11803.569909\n2 6191400 22900 8597.490253",
+        "gt_analysis": "The top 3 products in January 2022 are: SKU_Coded 6184900 with \u20ac12,054.16, SKU_Coded 6194250 with \u20ac11,803.57, SKU_Coded 6191400 with \u20ac8,597.49.",
         "visualization" : false,
         "gt_vis" : null,
         "difficulty": "hard"
@@ -96,7 +105,7 @@
     {
         "prompt": "Show me all the sales registered from January 2022 to January 2023, grouped by month. Then show me some insights about the sales and plot the data as bar plot - visualization",
         "gt_sql": "SELECT DATE_TRUNC('month', CAST(Sold_Date AS DATE)) AS month_start, SUM(Total_Sale_Value) AS total_revenue FROM sales WHERE CAST(Sold_Date AS DATE) >= DATE '2022-01-01' AND CAST(Sold_Date AS DATE) < DATE '2023-01-01' GROUP BY 1 ORDER BY 1 ASC",
-        "gt_data": "month_start\ttotal_revenue\n2022-01-01\t460090.187698\n2022-02-01\t405419.077911\n2022-03-01\t412956.587351\n2022-04-01\t371117.707672\n2022-05-01\t324769.278198\n2022-06-01\t324996.188044\n2022-07-01\t346132.107986\n2022-08-01\t368018.057711\n2022-09-01\t403554.177320\n2022-10-01\t462807.737202\n2022-11-01\t530981.688150\n2022-12-01\t884818.399738",
+        "gt_data": "month_start total_revenue\n2022-01-01 460090.187698\n2022-02-01 405419.077911\n2022-03-01 412956.587351\n2022-04-01 371117.707672\n2022-05-01 324769.278198\n2022-06-01 324996.188044\n2022-07-01 346132.107986\n2022-08-01 368018.057711\n2022-09-01 403554.177320\n2022-10-01 462807.737202\n2022-11-01 530981.688150\n2022-12-01 884818.399738",
         "gt_analysis": "The sales registered from January 2022 to January 2023 are: January - \u20ac460,090.19, February - \u20ac405,419.08, March - \u20ac412,956.59, April - \u20ac371,117.71, May - \u20ac324,769.28, June - \u20ac324,996.19, July - \u20ac346,132.11, August - \u20ac368,018.06, September - \u20ac403,554.18, October - \u20ac462,807.74, November - \u20ac530,981.69, December - \u20ac884,818.40.",
         "visualization" : true,
         "gt_vis" : {
@@ -104,7 +113,7 @@
             "x_axis": "month_start",
             "y_axis": "total_revenue",
             "title": "Total Sales by Month in 2022",
-            "data": "month_start\ttotal_revenue\n2022-01-01\t460090.187698\n2022-02-01\t405419.077911\n2022-03-01\t412956.587351\n2022-04-01\t371117.707672\n2022-05-01\t324769.278198\n2022-06-01\t324996.188044\n2022-07-01\t346132.107986\n2022-08-01\t368018.057711\n2022-09-01\t403554.177320\n2022-10-01\t462807.737202\n2022-11-01\t530981.688150\n2022-12-01\t884818.399738"
+            "data": "month_start total_revenue\n2022-01-01 460090.187698\n2022-02-01 405419.077911\n2022-03-01 412956.587351\n2022-04-01 371117.707672\n2022-05-01 324769.278198\n2022-06-01 324996.188044\n2022-07-01 346132.107986\n2022-08-01 368018.057711\n2022-09-01 403554.177320\n2022-10-01 462807.737202\n2022-11-01 530981.688150\n2022-12-01 884818.399738"
         },
         "difficulty": "hard"
     }

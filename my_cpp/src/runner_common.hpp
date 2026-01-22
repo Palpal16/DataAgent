@@ -35,6 +35,7 @@ struct JsonTestCase {
     std::string gt_vis_json;
     std::string gt_sql;
     std::string difficulty;
+    bool visualization = false;
 };
 
 std::vector<JsonTestCase> parse_json_test_cases(const std::string& filename);

@@ -146,7 +146,7 @@ llm_judge:
 #   "gt_sql": "..."                    # Optional, for reference only
 # }, ...]
 #test_cases_json: ./evaluation/our_dataset.json
-test_cases_json: ./evaluation/miguel.json
+test_cases_json: ./evaluation/our_dataset_test.json
 # Run in batch mode (process all test cases in JSON file)
 # When true, ignores single prompt/gt_csv/gt_text settings
 run_batch: true
