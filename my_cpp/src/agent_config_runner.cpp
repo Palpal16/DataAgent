@@ -725,6 +725,12 @@ int main(int argc, char** argv) {
                             run_cfg.best_of_n = bon;
                             run_cfg.temperature = t;
                             run_cfg.temperature_max = (tmax == "null" ? "" : tmax);
+                            if (test_cases[i].visualization) {
+                                run_cfg.agent_mode = "full";
+                                if (run_cfg.visualization_goal.empty()) {
+                                    run_cfg.visualization_goal = test_cases[i].prompt;
+                                }
+                            }
 
                             const std::string cmd = build_command(run_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file, gt_vis_json_file);
                             std::cout << "[Sweep] Executing: " << cmd << std::endl;
@@ -838,6 +844,12 @@ int main(int argc, char** argv) {
 
             RunnerConfig test_cfg = cfg;
             test_cfg.save_dir = save_dir;
+            if (test_cases[i].visualization) {
+                test_cfg.agent_mode = "full";
+                if (test_cfg.visualization_goal.empty()) {
+                    test_cfg.visualization_goal = test_cases[i].prompt;
+                }
+            }
 
             std::string cmd = build_command(test_cfg, test_cases[i].prompt, gt_csv_file, gt_text_file, gt_vis_json_file);
 

@@ -155,6 +155,31 @@ static std::string extract_json_object_raw(const std::string& obj, const std::st
     return obj.substr(pos, end - pos + 1);
 }
 
+static bool extract_json_bool(const std::string& obj, const std::string& key, bool& out) {
+    std::string search_key = "\"" + key + "\"";
+    size_t pos = obj.find(search_key);
+    if (pos == std::string::npos) return false;
+    pos = obj.find(':', pos);
+    if (pos == std::string::npos) return false;
+    pos++;
+    while (pos < obj.size() && (obj[pos] == ' ' || obj[pos] == '\t' || obj[pos] == '\r' || obj[pos] == '\n')) pos++;
+    if (pos + 4 <= obj.size() && obj.compare(pos, 4, "true") == 0) {
+        out = true;
+        return true;
+    }
+    if (pos + 5 <= obj.size() && obj.compare(pos, 5, "false") == 0) {
+        out = false;
+        return true;
+    }
+    // Also tolerate quoted "true"/"false"
+    if (pos < obj.size() && obj[pos] == '"') {
+        const std::string s = extract_json_string(obj, key);
+        if (s == "true" || s == "True" || s == "1") { out = true; return true; }
+        if (s == "false" || s == "False" || s == "0") { out = false; return true; }
+    }
+    return false;
+}
+
 std::vector<JsonTestCase> parse_json_test_cases(const std::string& filename) {
     std::vector<JsonTestCase> cases;
     std::ifstream file(filename);
@@ -179,6 +204,7 @@ std::vector<JsonTestCase> parse_json_test_cases(const std::string& filename) {
         tc.gt_vis_json = extract_json_object_raw(obj, "gt_vis");
         tc.gt_sql = extract_json_string(obj, "gt_sql");
         tc.difficulty = extract_json_string(obj, "difficulty");
+        (void)extract_json_bool(obj, "visualization", tc.visualization);
 
         if (!tc.prompt.empty()) cases.push_back(std::move(tc));
         pos = end + 1;

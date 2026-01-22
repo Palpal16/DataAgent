@@ -1,11 +1,17 @@
 [
   {
-    "prompt": "What is the total sales in october 2022 ?",
-    "gt_sql": "SELECT SUM(Total_Sale_Value) as Total_Sale FROM sales WHERE Sold_Date >= DATE '2022-10-01' AND Sold_Date < DATE '2022-11-01'",
-    "gt_data": "Total_Sale\n462807.737202",
-    "gt_analysis": "The total sales in october 2022 is \u20ac462,807.74.",
-    "visualization" : false,
-    "gt_vis" : null,
-    "difficulty": "easy"
+    "prompt": "Show me in a bar plot the monthly sales in 2022",
+    "gt_sql": "SELECT DATE_TRUNC('month', Sold_Date) as month_start, SUM(Total_Sale_Value) as total_revenue FROM sales WHERE EXTRACT(YEAR FROM Sold_Date) = 2022 GROUP BY DATE_TRUNC('month', Sold_Date) ORDER BY month_start ASC",
+    "gt_data": "month_start total_revenue\n2022-01-01 460090.187698\n2022-02-01 405419.077911\n2022-03-01 412956.587351\n2022-04-01 371117.707672\n2022-05-01 324769.278198\n2022-06-01 324996.188044\n2022-07-01 346132.107986\n2022-08-01 368018.057711\n2022-09-01 403554.177320\n2022-10-01 462807.737202\n2022-11-01 530981.688150\n2022-12-01 884818.399738",
+    "gt_analysis": "The monthly sales in 2022 are: January - \u20ac460,090.19, February - \u20ac405,419.08, March - \u20ac412,956.59, April - \u20ac371,117.71, May - \u20ac324,769.28, June - \u20ac324,996.19, July - \u20ac346,132.11, August - \u20ac368,018.06, September - \u20ac403,554.18, October - \u20ac462,807.74, November - \u20ac530,981.69, December - \u20ac884,818.40.",
+    "visualization" : true,
+    "gt_vis" : {
+        "chart_type": "bar",
+        "x_axis": "month_start",
+        "y_axis": "total_revenue",
+        "title": "Monthly Sales in 2022",
+        "data": "month_start total_revenue\n2022-01-01 460090.187698\n2022-02-01 405419.077911\n2022-03-01 412956.587351\n2022-04-01 371117.707672\n2022-05-01 324769.278198\n2022-06-01 324996.188044\n2022-07-01 346132.107986\n2022-08-01 368018.057711\n2022-09-01 403554.177320\n2022-10-01 462807.737202\n2022-11-01 530981.688150\n2022-12-01 884818.399738"
+    },
+    "difficulty": "medium"
 }
 ]
