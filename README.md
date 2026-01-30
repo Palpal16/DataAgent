@@ -25,6 +25,37 @@ pip install -r requirements.txt
 
 ---
 
+## Prompt difficulty → best config router (DistilBERT)
+
+This repo includes an optional **prompt-only** classifier that predicts difficulty (**easy / medium / hard**) and then selects the **best-performing configuration** (by `csv_score`) for that difficulty based on prior sweep results.
+
+### 1) Build the “best config by difficulty” table (from `evaluation/scores_runs.csv`)
+```powershell
+python -m evaluation.build_best_config_by_difficulty `
+  --scores-csv evaluation/scores_runs.csv `
+  --dataset-json evaluation/miguel.json `
+  --out evaluation/best_config_by_difficulty.json
+```
+
+### 2) Fine-tune DistilBERT on your labeled prompts
+First run will download `distilbert-base-uncased` from the Hugging Face Hub.
+
+```powershell
+python -m evaluation.train_difficulty_classifier `
+  --dataset evaluation/miguel.json `
+  --out-dir models/difficulty_distilbert
+```
+
+### 3) Route a new prompt → difficulty → recommended config
+```powershell
+python -m evaluation.prompt_config_router `
+  --prompt "Which stores sold more than 1000 items in December 2021?" `
+  --model-dir models/difficulty_distilbert `
+  --config-map evaluation/best_config_by_difficulty.json
+```
+
+---
+
 ## Start Ollama locally
 
 1) Install Ollama for your OS from `https://ollama.com/download`.

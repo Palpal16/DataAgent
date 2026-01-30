@@ -48,3 +48,7 @@ requests
 codecarbon
 flask
 nltk
+
+# --- Config selector (DistilRoBERTa) ---
+transformers
+torch

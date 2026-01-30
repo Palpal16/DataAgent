@@ -1,2 +1,0 @@
-BinderException: Binder Error: Referenced column "Product_Code" not found in FROM clause!
-Candidate bindings: "Product_Class_Code", "Sold_Date", "SKU_Coded", "Store_Number", "On_Promo"

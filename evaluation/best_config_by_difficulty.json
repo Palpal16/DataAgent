@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "scores_csv": "evaluation/scores_runs.csv",
+  "dataset_json": "evaluation/miguel.json",
+  "difficulty_labels": [
+    "easy",
+    "medium",
+    "hard"
+  ],
+  "best_config_by_difficulty": {
+    "easy": {
+      "two_stage_cot": true,
+      "best_of_n": 3,
+      "temperature": 0.0,
+      "temperature_max": 0.15,
+      "mean_csv_score": 0.6666666666666666,
+      "n": 12
+    },
+    "medium": {
+      "two_stage_cot": true,
+      "best_of_n": 3,
+      "temperature": 0.0,
+      "temperature_max": 0.15,
+      "mean_csv_score": 0.4701433982683983,
+      "n": 20
+    },
+    "hard": {
+      "two_stage_cot": false,
+      "best_of_n": 1,
+      "temperature": 0.0,
+      "temperature_max": 0.15,
+      "mean_csv_score": 0.1111111111111111,
+      "n": 12
+    }
+  },
+  "fallback_best_config": {
+    "two_stage_cot": true,
+    "best_of_n": 3,
+    "temperature": 0.0,
+    "temperature_max": 0.15,
+    "mean_csv_score": 0.40227648324239235,
+    "n": 44
+  }
+}
