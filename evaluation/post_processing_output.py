@@ -28,8 +28,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 
 
+# Experiment folder naming has evolved over time. We support both:
+# - rep1_tsfalse_bon2_t0_tmax_0
+# - rep1_tsfalse_bon2_t0_tmax0p15   (p encodes decimal point)
 _EXP_RE = re.compile(
-    r"^rep(?P<rep>\d+)_ts(?P<two_stage_cot>true|false)_bon(?P<best_of_n>\d+)_t(?P<t0>\d+)_tmax_(?P<tmax>\d+)_?$"
+    r"^rep(?P<rep>\d+)_ts(?P<two_stage_cot>true|false)_bon(?P<best_of_n>\d+)"
+    r"_t(?P<t0>[\dp]+)_tmax_?(?P<tmax>[\dp]+)_?$"
 )
 _TEST_RE = re.compile(r"^test_(?P<test_case>\d+)$")
 
@@ -42,13 +46,23 @@ class RunInfo:
     rep: Optional[int]
     two_stage_cot: Optional[bool]
     best_of_n: Optional[int]
-    t0: Optional[int]
-    tmax: Optional[int]
+    t0: Optional[float]
+    tmax: Optional[float]
 
 
 def _safe_int(x: Any) -> Optional[int]:
     try:
         return int(x)
+    except Exception:
+        return None
+
+
+def _safe_float(x: Any) -> Optional[float]:
+    """Parse float, accepting strings like '0p15' (used in directory naming)."""
+    try:
+        if isinstance(x, str):
+            x = x.replace("p", ".")
+        return float(x)
     except Exception:
         return None
 
@@ -63,14 +77,16 @@ def _parse_run_info(stage_metrics_path: Path) -> RunInfo:
     if m_test:
         test_case = _safe_int(m_test.group("test_case"))
 
-    rep = two_stage_cot = best_of_n = t0 = tmax = None
+    rep = two_stage_cot = best_of_n = None
+    t0: Optional[float] = None
+    tmax: Optional[float] = None
     m_exp = _EXP_RE.match(experiment)
     if m_exp:
         rep = _safe_int(m_exp.group("rep"))
         two_stage_cot = m_exp.group("two_stage_cot") == "true"
         best_of_n = _safe_int(m_exp.group("best_of_n"))
-        t0 = _safe_int(m_exp.group("t0"))
-        tmax = _safe_int(m_exp.group("tmax"))
+        t0 = _safe_float(m_exp.group("t0"))
+        tmax = _safe_float(m_exp.group("tmax"))
 
     return RunInfo(
         experiment=experiment,

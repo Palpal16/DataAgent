@@ -21,6 +21,7 @@ SPICE-1.0/
 SPICE-1.0.zip
 spice
 tmp/
+exp4_bestof_sweep/
 
 
 loop.py
@@ -32,8 +33,9 @@ test_data_agent.ipynb
 output
 output_google_colab
 results
-
+notes/
 jmeter.log
 
 codecarbon
 .cache
+models/

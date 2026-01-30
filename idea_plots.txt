@@ -1,2 +1,0 @@
-Energy vs Step of graph flow
-Compare In Bar plot the use of parallelized evaluator vs non paralelized one
