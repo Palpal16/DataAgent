@@ -22,6 +22,7 @@ SPICE-1.0.zip
 spice
 tmp/
 exp4_bestof_sweep/
+exp5_bestof_sweep/
 
 
 loop.py
