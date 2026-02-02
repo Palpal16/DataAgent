@@ -1,0 +1,12 @@
+# Optional ML dependencies (training + difficulty classifier).
+# Install only if you need the DistilBERT difficulty model:
+#
+#   python -m pip install -r requirements.txt -r requirements-ml.txt
+#
+# Note: For CPU-only PyTorch wheels, see PyTorch install selector.
+
+torch
+torchvision
+transformers
+scikit-learn
+
