@@ -82,19 +82,20 @@ Batch / sweep modes are controlled by fields like `run_batch`, `test_cases_json`
 
 This project evaluates three common inference-time strategies:
 - **One-shot** (single run)
+<p align="center">
+  <img src="images/one-shot.png" width="500" alt="One-shot inference diagram" />
+</p>
+
 - **Best-of-\(n\)** (multiple runs + select best by score)
+
+<p align="center">
+  <img src="images/best_n.png" width="500" alt="Best-of-n inference diagram" />
+</p>
+
 - **Two-stage CoT** (plan → execute)
 
 <p align="center">
-  <img src="images/one-shot.png" width="800" alt="One-shot inference diagram" />
-</p>
-
-<p align="center">
-  <img src="images/best_n.png" width="800" alt="Best-of-n inference diagram" />
-</p>
-
-<p align="center">
-  <img src="images/chain_thought.png" width="800" alt="Two-stage chain-of-thought diagram" />
+  <img src="images/chain_thought.png" width="500" alt="Two-stage chain-of-thought diagram" />
 </p>
 
 ---
@@ -104,11 +105,11 @@ This project evaluates three common inference-time strategies:
 This repo includes an optional **prompt-only** classifier that predicts difficulty (**easy / medium / hard**) and then selects the **best-performing configuration** (by `csv_score`) for that difficulty based on prior sweep results.
 
 <p align="center">
-  <img src="images/classification.png" width="800" alt="Difficulty classification diagram" />
+  <img src="images/classification.png" width="500" alt="Difficulty classification diagram" />
 </p>
 
 <p align="center">
-  <img src="images/flow_prompt.png" width="900" alt="Prompt to difficulty to best config to runner flow" />
+  <img src="images/flow_prompt.png" width="700" alt="Prompt to difficulty to best config to runner flow" />
 </p>
 
 ### 1) Build the “best config by difficulty” table (from `evaluation/scores_runs.csv`)
@@ -570,7 +571,7 @@ spice:
 4. Visualize (LLM): emit compact config → generate matplotlib code to plot.
 
 <p align="center">
-  <img src="images/langraph_flow.png" width="850" alt="LangGraph workflow overview" />
+  <img src="images/langraph_flow.png" width="500" alt="LangGraph workflow overview" />
 </p>
 
 The agent exposes a single `run(prompt, visualization_goal=None, initial_state=None)` entry point and returns the final state with an ordered `answer` list (analysis and then chart code when applicable).
@@ -622,33 +623,33 @@ The plots in `results/` are generated from controlled sweeps over **test-time co
 ### CSV accuracy by difficulty (two-stage CoT = False / True)
 
 <p align="center">
-  <img src="results/difficulty_vs_csv_score_best_of_n_two_stage_cot_False.png" width="900" alt="CSV score by difficulty and best-of-n (two-stage CoT = False)" />
+  <img src="results/difficulty_vs_csv_score_best_of_n_two_stage_cot_False.png" width="500" alt="CSV score by difficulty and best-of-n (two-stage CoT = False)" />
 </p>
 
 <p align="center">
-  <img src="results/difficulty_vs_csv_score_best_of_n_two_stage_cot_True.png" width="900" alt="CSV score by difficulty and best-of-n (two-stage CoT = True)" />
+  <img src="results/difficulty_vs_csv_score_best_of_n_two_stage_cot_True.png" width="500" alt="CSV score by difficulty and best-of-n (two-stage CoT = True)" />
 </p>
 
 ### Text quality by difficulty (BLEU vs SPICE)
 
 <p align="center">
-  <img src="results/bleu_spice_difficulty_best_of_n.png" width="950" alt="BLEU and SPICE by difficulty and best-of-n" />
+  <img src="results/bleu_spice_difficulty_best_of_n.png" width="500" alt="BLEU and SPICE by difficulty and best-of-n" />
 </p>
 
 ### Cost by difficulty (end-to-end duration)
 
 <p align="center">
-  <img src="results/difficulty_vs_duration_ms_best_of_n.png" width="950" alt="Duration by difficulty and best-of-n" />
+  <img src="results/difficulty_vs_duration_ms_best_of_n.png" width="500" alt="Duration by difficulty and best-of-n" />
 </p>
 
 ### Stage-level cost (duration and emissions)
 
 <p align="center">
-  <img src="results/stage_vs_duration_ms_best_of_n.png" width="950" alt="Stage duration by best-of-n" />
+  <img src="results/stage_vs_duration_ms_best_of_n.png" width="500" alt="Stage duration by best-of-n" />
 </p>
 
 <p align="center">
-  <img src="results/stage_vs_emissions_kg_est_best_of_n.png" width="950" alt="Stage emissions by best-of-n" />
+  <img src="results/stage_vs_emissions_kg_est_best_of_n.png" width="500" alt="Stage emissions by best-of-n" />
 </p>
 
 ### Key findings (summary)
@@ -659,4 +660,4 @@ The plots in `results/` are generated from controlled sweeps over **test-time co
 - **`create_visualization` dominates stage cost when present**: stage-level logs show `create_visualization` as the main contributor to duration and emissions, followed by `analyzing_data`; `lookup_sales_data` is consistently smaller.
 - **SPICE stays higher than BLEU** across difficulties: semantic overlap is often preserved even when surface \(n\)-gram overlap drops; best-of-\(n\) helps most on easy prompts, with smaller (sometimes negative) changes on medium/hard.
 
-This matches recent agent-scaling results showing that “more coordination/agents” helps primarily when it aligns with task structure (parallelizable vs sequential) rather than universally improving performance (Kim et al., 2025) at Google Research.
+This matches recent agent-scaling results showing that “more coordination/agents” helps primarily when it aligns with task structure (parallelizable vs sequential) rather than universally improving performance (Kim et al., 2025) at [Google Research](https://research.google/blog/towards-a-science-of-scaling-agent-systems-when-and-why-agent-systems-work/).
