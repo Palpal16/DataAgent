@@ -23,5 +23,11 @@ Thumbs.db
 # Other
 *.log
 
+# C++ builds / caches (host-generated; break container builds)
+my_cpp/build/
+my_cpp/build-*/
+my_cpp/**/CMakeFiles/
+my_cpp/**/CMakeCache.txt
+
 # Keep parquet dataset but exclude other large data
 !data/Store_Sales_Price_Elasticity_Promotions_Data.parquet

@@ -33,7 +33,6 @@ ninja
 test_data_agent.ipynb
 output
 output_google_colab
-results
 notes/
 jmeter.log
 

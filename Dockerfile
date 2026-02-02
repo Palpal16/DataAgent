@@ -1,4 +1,5 @@
-# syntax=docker/dockerfile:1
+# NOTE: intentionally no `# syntax=` directive here to avoid pulling
+# `docker.io/docker/dockerfile:*` on restricted networks.
 
 FROM python:3.12-slim
 

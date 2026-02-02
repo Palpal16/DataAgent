@@ -1,0 +1,83 @@
+# ================================================================================
+# EXPERIMENT 1 (Docker / no SPICE)
+# Best-of-N sweep: best_of_n in {1,2,3} at fixed temperature=0
+# Repetitions: 3 per setting
+#
+# Differences vs `agent_config_exp1_bestof_sweep.yaml`:
+# - Uses `python3` (works inside Linux containers)
+# - Uses host Ollama via `host.docker.internal`
+# - Disables SPICE by switching text_eval_method to BLEU only
+# ================================================================================
+
+prompt: "average yearly sales"
+data_path: null
+visualization_goal: null
+
+# Python executable used by the C++ config runner (inside container)
+python_bin: "python3"
+
+model: "llama3.2:3b"
+
+# On Docker Desktop (Windows/macOS), this reaches the host from inside the container
+ollama_url: "http://host.docker.internal:11434"
+
+temperature: 0
+temperature_max: "0"
+
+agent_mode: "analysis"
+
+two_stage_cot: false
+cot_max_bullets: 7
+cot_print_plan: false
+cot_store_plan: false
+
+# Save into the mounted Docker volume (see README docker runner section).
+save_dir: /app/output/exp1_bestof_sweep
+
+gt_csv: null
+gt_text: null
+
+enable_csv_eval: true
+csv_eval_method: "python"  # python | cpp
+csv_iou_type: "table"
+cpp_evaluator:
+  executable: null
+  keys: null
+  threads: 8
+  benchmark: true
+  benchmark_iters: 10
+
+enable_text_eval: true
+
+# Options: bleu | spice | bleu+spice | llm
+# Use BLEU-only to avoid SPICE jar/java dependency in Docker.
+text_eval_method: "bleu"
+bleu:
+  use_nltk: false
+
+llm_judge:
+  model: null
+
+emit_viz_placeholders: true
+
+test_cases_json: ./evaluation/miguel.json
+run_batch: true
+
+sweep:
+  enabled: true
+  two_stage_cot: "false,true"
+  best_of_n: "1,2,3"
+  temperature: "0"
+  temperature_max: "0"
+  dir_naming: "config"
+  repetitions: 3
+
+enable_tracing: false
+phoenix:
+  endpoint: "http://localhost:6006/v1/traces"
+  project_name: "evaluating-agent"
+  api_key: null
+  auto_start: true
+
+enable_codecarbon: true
+

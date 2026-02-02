@@ -649,7 +649,21 @@ int main(int argc, char** argv) {
     std::string config_file = "agent_config.yaml";
 
     if (argc > 1) {
-        config_file = argv[1];
+        const std::string arg1 = argv[1];
+        if (arg1 == "--help" || arg1 == "-h") {
+            std::cerr << "Usage: agent_config_runner [CONFIG_FILE]\n";
+            std::cerr << "\n";
+            std::cerr << "Runs the Python agent (`python -m Agent.data_agent`) using a YAML configuration.\n";
+            std::cerr << "\n";
+            std::cerr << "Modes (set in YAML):\n";
+            std::cerr << "  - Single run:  set `prompt`\n";
+            std::cerr << "  - Batch:       set `run_batch: true` and `test_cases_json`\n";
+            std::cerr << "  - Sweep:       set `sweep.enabled: true` (typically with batch)\n";
+            std::cerr << "\n";
+            std::cerr << "See `config/agent_config.yaml` for a full example.\n";
+            return 0;
+        }
+        config_file = arg1;
     }
 
     std::cout << "[ConfigRunner] Loading configuration from: " << config_file << std::endl;
