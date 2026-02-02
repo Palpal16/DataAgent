@@ -1,4 +1,8 @@
-## Sales Data Agent
+## LLM-Powered Data Analysis System: An Accuracy-Focused Evaluation of Open Source Models
+
+<p align="center">
+  <img src="Report/Images/Workflow.png" width="1000" alt="DataAgent system workflow" />
+</p>
 
 An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes the results, and generates visualization code. It uses a LangGraph workflow and supports **multiple LLM providers**:
 
@@ -11,6 +15,15 @@ An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes 
 - Analyze: asks the LLM to summarize/interpret the results.
 - Visualize: requests a minimal chart configuration and emits matplotlib code to plot it.
 
+
+### Quickstart (local)
+```powershell
+python -m pip install -r requirements.txt
+ollama serve
+ollama pull llama3.2:3b
+python -m Agent.data_agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
+```
+
 ---
 
 ## Requirements
@@ -20,14 +33,83 @@ An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes 
 
 Install Python deps (from the project root):
 ```powershell
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+---
+
+## C++ config runner (recommended)
+
+The **core workflow** for running experiments and sweeps is the C++ runner `agent_config_runner` (fast outer-loop orchestration, Python agent stays the inner-loop).
+
+### Build C++ tools
+
+The C++ tools live under `my_cpp/` and are built via CMake (C++17):
+- `agent_config_runner` (batch/sweep runner)
+- `resultcmp` (CSV comparator)
+- `agent_config_runner_jmeter` (runner variant for JMeter workflows)
+
+Build (from repo root):
+```powershell
+cmake -S my_cpp -B my_cpp/build -G "Ninja"  # or "Visual Studio 17 2022" on Windows
+cmake --build my_cpp/build --config Release
+```
+
+### Run an experiment from YAML
+
+Edit `config/agent_config.yaml`, then run:
+```powershell
+# Windows (PowerShell)
+.\my_cpp\build\agent_config_runner.exe config\agent_config.yaml
+
+# Linux/macOS
+./my_cpp/build/agent_config_runner config/agent_config.yaml
+```
+
+Minimal example:
+```yaml
+prompt: "Show me the sales in Nov 2021"
+visualization_goal: "Sales trend for Nov 2021"
+agent_mode: "full"
+save_dir: ./output
+```
+
+Batch / sweep modes are controlled by fields like `run_batch`, `test_cases_json`, and `sweep.*` in the YAML.
+
+---
+
+## Test-time compute strategies (visual overview)
+
+This project evaluates three common inference-time strategies:
+- **One-shot** (single run)
+- **Best-of-\(n\)** (multiple runs + select best by score)
+- **Two-stage CoT** (plan → execute)
+
+<p align="center">
+  <img src="images/one-shot.png" width="800" alt="One-shot inference diagram" />
+</p>
+
+<p align="center">
+  <img src="images/best_n.png" width="800" alt="Best-of-n inference diagram" />
+</p>
+
+<p align="center">
+  <img src="images/chain_thought.png" width="800" alt="Two-stage chain-of-thought diagram" />
+</p>
 
 ---
 
 ## Prompt difficulty → best config router (DistilBERT)
 
 This repo includes an optional **prompt-only** classifier that predicts difficulty (**easy / medium / hard**) and then selects the **best-performing configuration** (by `csv_score`) for that difficulty based on prior sweep results.
+
+<p align="center">
+  <img src="images/classification.png" width="800" alt="Difficulty classification diagram" />
+</p>
+
+<p align="center">
+  <img src="images/flow_prompt.png" width="900" alt="Prompt to difficulty to best config to runner flow" />
+</p>
 
 ### 1) Build the “best config by difficulty” table (from `evaluation/scores_runs.csv`)
 ```powershell
@@ -86,10 +168,13 @@ If you need to run against a remote server, ensure the API is reachable and set 
 DataAgent/
   Agent/
     data_agent.py        # SalesDataAgent class and LangGraph wiring
+  evaluation/            # evaluation scripts + sweep logs + difficulty router
+  my_cpp/                # resultcmp (C++ CSV comparator) + agent_config_runner (C++ runner)
+  config/                # YAML configs for runner and experiments
   data/
     Store_Sales_Price_Elasticity_Promotions_Data.parquet
   LangChainAgent.ipynb   # Original notebook prototype
-  readme.MD              # This file
+  README.md              # This file
 ```
 
 ---
@@ -122,6 +207,33 @@ print("Answer steps:", len(result.get("answer", [])))
 # If the last answer is chart code, execute it to render the chart
 if result.get("chart_config") and result.get("answer"):
     exec(result["answer"][-1], globals(), locals())
+```
+
+### From the CLI
+
+The CLI is the same code path as the notebook/API, exposed as a module:
+
+```powershell
+python -m Agent.data_agent --help
+```
+
+Common examples:
+
+```powershell
+# Full pipeline (lookup + analysis + visualization)
+python -m Agent.data_agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
+
+# Lookup-only (SQL + data table)
+python -m Agent.data_agent "Weekly sales in 2021" --lookup_only
+
+# Analysis-only (no visualization)
+python -m Agent.data_agent "Which stores sold more than 1000 items in Dec 2021?" --no_vis
+
+# Two-stage plan -> final output
+python -m Agent.data_agent "Top products by revenue" --two_stage_cot --cot_max_bullets 8
+
+# Best-of-n (self-consistency) with a temperature schedule
+python -m Agent.data_agent "Top products by revenue" --best_of_n 3 --temp 0.1 --temp-max 0.6
 ```
 
 ---
@@ -191,56 +303,8 @@ You should see spans named: `AgentRun`, `tool_choice`, `sql_query_exec`, `data_a
 - For Cloud, ensure `phoenix_api_key` is set and valid.
 
 ### From the config runner
-Edit `config/agent_config.yaml`, then run the config runner:
-```powershell
-# Windows (PowerShell)
-.\my_cpp\build\agent_config_runner.exe config\agent_config.yaml
+See the main section above: **“C++ config runner (recommended)”**.
 
-# Linux/macOS
-./my_cpp/build/agent_config_runner config/agent_config.yaml
-```
-
-Basic example (prompt + visualization goal):
-```yaml
-prompt: "Show me the sales in Nov 2021"
-visualization_goal: "Sales trend for Nov 2021"
-agent_mode: "full"
-save_dir: ./output
-```
-
-Override the parquet path:
-```yaml
-data_path: "C:/path/to/your.parquet"
-```
-
-Save the lookup result to CSV (no analysis, no visualization):
-```yaml
-prompt: "What were the sales in November 2021?"
-agent_mode: "lookup_only"
-save_dir: ./results/sales_november_2021
-```
-The CSV will be written to `run_data.csv` inside `save_dir`.
-
-Best-of-N self-consistency for SQL generation (lookup only):
-```yaml
-prompt: "What were the sales in November 2021?"
-agent_mode: "lookup_only"
-best_of_n: 5
-temperature: 0.0
-temperature_max: 0.6
-save_dir: ./results/sales_november_2021
-```
-
-Compare generated CSV vs a ground-truth CSV (IoU metrics):
-```yaml
-prompt: "What were the sales in November 2021?"
-agent_mode: "lookup_only"
-save_dir: ./results/sales_november_2021
-gt_csv: "./results/real_sales_november_2021.csv"
-enable_csv_eval: true
-csv_eval_method: "python"
-csv_iou_type: "rows"
-```
 ---
 
 ## Optional: Evaluate results with a C++ comparator
@@ -251,6 +315,17 @@ cd my_cpp
 cmake -S . -B build -G "Ninja"  # or "Visual Studio 17 2022" on Windows
 cmake --build build --config Release
 cd ..
+```
+
+### Benchmark “optimized C++ (OpenMP)” vs “normal C++ (serial)”
+The `resultcmp` binary supports:
+- `--threads N` (OpenMP threads; `1` is effectively serial)
+- `--benchmark` and `--benchmark-iters K` (runs an internal serial vs parallel micro-benchmark and prints timings in the JSON output)
+
+Example (direct CLI):
+```powershell
+.\my_cpp\build\resultcmp.exe --actual .\output\test_1\run_data.csv --expected .\output\test_1\gt_data.csv --key "Store_Number,SKU_Coded" --threads 1
+.\my_cpp\build\resultcmp.exe --actual .\output\test_1\run_data.csv --expected .\output\test_1\gt_data.csv --key "Store_Number,SKU_Coded" --threads 8 --benchmark --benchmark-iters 5
 ```
 
 Run the agent and compare the produced CSV with an expected CSV (C++ comparator):
@@ -264,6 +339,9 @@ csv_eval_method: "cpp"
 cpp_evaluator:
   executable: "./my_cpp/build/resultcmp.exe"
   keys: "week,store_id"
+  threads: 8            # OpenMP threads (if available)
+  benchmark: true       # add serial-vs-parallel benchmark to the JSON output
+  benchmark_iters: 5
 ```
 
 The final returned dict will include an `evaluation` field like:
@@ -295,7 +373,7 @@ docker build -f Dockerfile -t data-agent .
 
 Run (Docker Desktop on Windows/macOS):
 ```powershell
-docker run --rm -e OLLAMA_HOST=http://host.docker.internal:11434 \
+docker run --rm -e OLLAMA_HOST=http://host.docker.internal:11434 `
   data-agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
 ```
 
@@ -307,8 +385,8 @@ docker run --rm -e OLLAMA_HOST=http://192.168.1.10:11434 \
 
 Use a custom parquet by mounting it over the default path inside the container:
 ```powershell
-docker run --rm -e OLLAMA_HOST=http://host.docker.internal:11434 \
-  -v C:\path\to\your.parquet:/app/data/Store_Sales_Price_Elasticity_Promotions_Data.parquet \
+docker run --rm -e OLLAMA_HOST=http://host.docker.internal:11434 `
+  -v C:\path\to\your.parquet:/app/data/Store_Sales_Price_Elasticity_Promotions_Data.parquet `
   data-agent "Show weekly sales trend in 2021"
 ```
 
@@ -325,6 +403,45 @@ Notes:
 
 ---
 
+## Docker: run experiments with `agent_config_runner` (recommended for containerized sweeps)
+
+If you want to run the **C++ config runner** inside Docker (so C++ + Python deps are fully reproducible), use `Dockerfile.runner`.
+
+### Build
+```powershell
+docker build -f Dockerfile.runner -t data-agent-runner .
+```
+
+### Run a YAML experiment / sweep
+Mount an output folder and a config YAML into the container:
+```powershell
+$outDir = "$PWD\\output\\docker_runner"
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+docker run --rm -it `
+  -e OLLAMA_HOST=http://host.docker.internal:11434 `
+  -v "${outDir}:/app/output" `
+  -v "$PWD\\config\\agent_config_exp1_bestof_sweep_docker_no_spice.yaml:/app/config.yaml" `
+  data-agent-runner /app/config.yaml
+```
+
+Important:
+- For Docker/Linux, your YAML must not reference a Windows venv like `.venv\\Scripts\\python.exe`. Use `python_bin: "python3"` or omit `python_bin` (Linux default is `python3`).
+- The provided Docker config already sets `save_dir: /app/output/...` so results persist on the host.
+- If you use a custom parquet, mount it over the default path `/app/data/Store_Sales_Price_Elasticity_Promotions_Data.parquet`.
+
+### Useful C++ runner flags
+
+All C++ binaries now support `--help`:
+
+```powershell
+.\my_cpp\build\agent_config_runner.exe --help
+.\my_cpp\build\agent_config_runner_jmeter.exe --help
+.\my_cpp\build\resultcmp.exe --help
+```
+
+---
+
 ## Download and Install Apache JMeter
 
 To perform load testing and performance analysis, you may want to use Apache JMeter. Follow these steps to download and install JMeter:
@@ -335,7 +452,7 @@ To perform load testing and performance analysis, you may want to use Apache JMe
    - Make sure to install java+8 [Java Download](https://www.java.com/en/download/manual.jsp)
 
 2. **Extract the Archive:**
-   - Extract the contents of the downloaded ZIP file to a directory of your choice. This directory will be your JMeter home. We created a folder and put in this project directly.
+   - Extract the downloaded ZIP to any directory (your JMeter home).
 
 3. **Run JMeter:**
    - Navigate to the `bin` directory of your JMeter installation.
@@ -446,11 +563,15 @@ spice:
 
 ---
 
-## High-level flow
+## High-level LangGraph flow
 1. Decide tool (LLM): choose lookup → analyze → visualize → end.
 2. Lookup (DuckDB): parquet → temp table → LLM SQL → query → text table in state.
 3. Analyze (LLM): summarize/answer with reference to the result data.
 4. Visualize (LLM): emit compact config → generate matplotlib code to plot.
+
+<p align="center">
+  <img src="images/langraph_flow.png" width="850" alt="LangGraph workflow overview" />
+</p>
 
 The agent exposes a single `run(prompt, visualization_goal=None, initial_state=None)` entry point and returns the final state with an ordered `answer` list (analysis and then chart code when applicable).
 
@@ -488,50 +609,54 @@ Notes:
 
 
 ## Building agent_config_runner
+See: **“C++ config runner (recommended)”** (build + usage + YAML examples).
 
-### Quick Build
+---
 
-```bash
-# Compile directly
-g++ -std=c++11 -o agent_config_runner agent_config_runner.cpp
+## Results & key findings
 
-# Or with CMake
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make
-```
+The plots in `results/` are generated from controlled sweeps over **test-time compute** knobs:
+- **best-of-\(n\)** (self-consistency via repeated runs + selection)
+- **two-stage CoT** (Plan → Final)
 
-### Usage
+### CSV accuracy by difficulty (two-stage CoT = False / True)
 
-```bash
-# Use default agent_config.yaml in current directory
-./agent_config_runner
+<p align="center">
+  <img src="results/difficulty_vs_csv_score_best_of_n_two_stage_cot_False.png" width="900" alt="CSV score by difficulty and best-of-n (two-stage CoT = False)" />
+</p>
 
-# Specify custom config file
-./agent_config_runner path/to/my_config.yaml
-```
+<p align="center">
+  <img src="results/difficulty_vs_csv_score_best_of_n_two_stage_cot_True.png" width="900" alt="CSV score by difficulty and best-of-n (two-stage CoT = True)" />
+</p>
 
-### Single Query Mode
+### Text quality by difficulty (BLEU vs SPICE)
 
-Set in agent_config.yaml:
-```yaml
-prompt: "Your question"
-run_batch: false
-```
+<p align="center">
+  <img src="results/bleu_spice_difficulty_best_of_n.png" width="950" alt="BLEU and SPICE by difficulty and best-of-n" />
+</p>
 
-### Batch Mode
+### Cost by difficulty (end-to-end duration)
 
-Set in agent_config.yaml:
-```yaml
-test_cases_json: ./test_cases.json
-run_batch: true
-```
+<p align="center">
+  <img src="results/difficulty_vs_duration_ms_best_of_n.png" width="950" alt="Duration by difficulty and best-of-n" />
+</p>
 
-### Features
+### Stage-level cost (duration and emissions)
 
-✓ Efficient YAML parsing (no external dependencies)
-✓ Batch processing with progress tracking
-✓ Temporary file handling for gt_data/gt_analysis
-✓ Per-test-case save directories
-✓ Success/failure reporting
-✓ Minimal overhead
+<p align="center">
+  <img src="results/stage_vs_duration_ms_best_of_n.png" width="950" alt="Stage duration by best-of-n" />
+</p>
+
+<p align="center">
+  <img src="results/stage_vs_emissions_kg_est_best_of_n.png" width="950" alt="Stage emissions by best-of-n" />
+</p>
+
+### Key findings (summary)
+
+- **Best-of-\(n\) alone gives limited CSV gains**: without two-stage CoT, `csv_score` is largely flat across \(n\) (easy/medium), with hard remaining low.
+- **Two-stage CoT enables best-of-\(n\) improvements**: with Plan → Final, `csv_score` increases with \(n\) (especially \(n=3\)) for easy/medium prompts, while hard prompts remain near-zero.
+- **Latency grows with \(n\)** and spikes on hard prompts: repeating full runs increases end-to-end time roughly proportionally, but hard prompts show much larger jumps at higher \(n\).
+- **`create_visualization` dominates stage cost when present**: stage-level logs show `create_visualization` as the main contributor to duration and emissions, followed by `analyzing_data`; `lookup_sales_data` is consistently smaller.
+- **SPICE stays higher than BLEU** across difficulties: semantic overlap is often preserved even when surface \(n\)-gram overlap drops; best-of-\(n\) helps most on easy prompts, with smaller (sometimes negative) changes on medium/hard.
+
+This matches recent agent-scaling results showing that “more coordination/agents” helps primarily when it aligns with task structure (parallelizable vs sequential) rather than universally improving performance (Kim et al., 2025) at Google Research.

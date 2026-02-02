@@ -1,0 +1,54 @@
+# NOTE: intentionally no `# syntax=` directive here to avoid pulling
+# `docker.io/docker/dockerfile:*` on restricted networks.
+#
+# Docker image to run the C++ config runner (agent_config_runner) for experiments/sweeps.
+# It builds the C++ binaries inside the container and installs Python dependencies for the agent.
+#
+# Usage (from repo root):
+#   docker build -f Dockerfile.runner -t data-agent-runner .
+#   docker run --rm -it -e OLLAMA_HOST=http://host.docker.internal:11434 ^
+#     -v "%CD%/output:/app/output" ^
+#     -v "%CD%/config/agent_config_exp1_bestof_sweep_docker_no_spice.yaml:/app/config.yaml" ^
+#     data-agent-runner /app/config.yaml
+#
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System deps for building C++ and for Python deps (pandas/pyarrow/etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    ninja-build \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Project code needed by the runner + agent
+COPY Agent ./Agent
+COPY evaluation ./evaluation
+COPY config ./config
+COPY my_cpp ./my_cpp
+
+# Dataset (optional; you can also mount your own parquet at runtime)
+COPY data ./data
+
+# Build C++ tools (Release)
+#
+# Important: never reuse a host-generated CMake cache (e.g., Windows/WSL `my_cpp/build/`).
+# Build into a clean, container-only build directory.
+RUN rm -rf my_cpp/build my_cpp/build-docker \
+    && cmake -S my_cpp -B my_cpp/build-docker -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build my_cpp/build-docker --config Release
+
+# Default: run the C++ config runner; pass a YAML path as argument.
+#
+# Example:
+#   docker run ... data-agent-runner /app/config/agent_config.yaml
+ENTRYPOINT ["/app/my_cpp/build-docker/agent_config_runner"]
+CMD ["/app/config/agent_config.yaml"]
+

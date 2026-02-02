@@ -551,7 +551,24 @@ static void print_json(const DiffSummary &s) {
 
 // Print CLI usage to stderr
 static void print_usage() {
-    std::cerr << "Usage: resultcmp --actual A.csv --expected E.csv [--key k1,k2] [--case-insensitive] [--debug] [--threads N] [--benchmark] [--benchmark-iters K]\n";
+    std::cerr << "Usage: resultcmp --actual A.csv --expected E.csv [OPTIONS]\n";
+    std::cerr << "\nRequired:\n";
+    std::cerr << "  --actual PATH           Path to actual/observed CSV\n";
+    std::cerr << "  --expected PATH         Path to expected/ground-truth CSV\n";
+    std::cerr << "\nOptions:\n";
+    std::cerr << "  --key COL1,COL2         Comma-separated key columns for row alignment\n";
+    std::cerr << "                          (enables order-insensitive matching)\n";
+    std::cerr << "  --case-insensitive      Compare strings case-insensitively\n";
+    std::cerr << "  --debug                 Print debug info to stderr\n";
+    std::cerr << "  --threads N             OpenMP threads (0=auto; requires OpenMP build)\n";
+    std::cerr << "  --benchmark             Run internal serial vs parallel benchmark\n";
+    std::cerr << "  --benchmark-iters K      Benchmark iterations (default: 3)\n";
+    std::cerr << "  --help, -h              Show this help message\n";
+    std::cerr << "\nExit codes:\n";
+    std::cerr << "  0  Tables equal\n";
+    std::cerr << "  1  Tables differ\n";
+    std::cerr << "  2  Usage error or file I/O error\n";
+    std::cerr << "\nOutput: JSON to stdout with IoU metrics.\n";
 }
 
 // CLI entrypoint:

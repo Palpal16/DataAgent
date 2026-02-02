@@ -644,7 +644,17 @@ int main(int argc, char** argv) {
     std::string config_file = "agent_config.yaml";
 
     if (argc > 1) {
-        config_file = argv[1];
+        const std::string arg1 = argv[1];
+        if (arg1 == "--help" || arg1 == "-h") {
+            std::cerr << "Usage: agent_config_runner_jmeter [CONFIG_FILE]\n";
+            std::cerr << "\n";
+            std::cerr << "Runs JMeter load tests against the Flask API (agent_api.py).\n";
+            std::cerr << "Set `use_jmeter: true` in the YAML to enable JMeter mode.\n";
+            std::cerr << "\n";
+            std::cerr << "See `config/agent_config_jmeter.yaml` for an example.\n";
+            return 0;
+        }
+        config_file = arg1;
     }
 
     std::cout << "[ConfigRunner] Loading configuration from: " << config_file << std::endl;

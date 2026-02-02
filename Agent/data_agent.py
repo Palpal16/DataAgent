@@ -335,8 +335,8 @@ def lookup_sales_data(state: State, llm: ChatOllama, tracer=None) -> Dict:
 
     Args:
         state: Conversation state; must include 'prompt'.
-        data_path: Filesystem path to the parquet dataset. // ADD LATER
         llm: ChatOllama instance used for prompt-to-SQL generation.
+        tracer: Optional OpenTelemetry/Phoenix tracer to record spans.
 
     Returns:
         Updated state containing 'data' (string table) or 'error'.
@@ -704,12 +704,27 @@ class SalesDataAgent:
         """Initialize the agent and compile the graph.
 
         Args:
-            model: Ollama model name.
+            model: LLM model identifier. Supports:
+                - Ollama: "llama3.2:3b" (default), "llama3.1:70b", etc.
+                - OpenAI: "openai:gpt-4o-mini" (requires OPENAI_API_KEY)
+                - Anthropic: "anthropic:claude-3-5-sonnet-latest" (requires ANTHROPIC_API_KEY)
             temperature: Sampling temperature for the LLM.
             max_tokens: Generation token limit.
             streaming: Whether to stream tokens from the LLM.
-            data_path: Optional override for the parquet dataset path.
-            ollama_url: Optional override for Ollama base URL; defaults to OLLAMA_HOST or http://localhost:11434.
+            data_path: Optional override for the parquet dataset path (defaults to
+                `data/Store_Sales_Price_Elasticity_Promotions_Data.parquet`).
+            ollama_url: Optional override for Ollama base URL; defaults to OLLAMA_HOST or
+                http://localhost:11434.
+            two_stage_cot: If True, enables two-stage reasoning (internal plan then final output).
+                Can improve accuracy on complex prompts, but increases latency/cost.
+            cot_max_bullets: Max bullet points in the internal plan (when two_stage_cot=True).
+                Clamped to [1, 50].
+            cot_print_plan: If True, prints the plan (debugging).
+            cot_store_plan: If True, stores plan(s) in output artifacts (when best-of-n is used).
+            enable_tracing: Enable OpenInference/Phoenix tracing for debugging and evaluation.
+            phoenix_api_key: API key for Phoenix Cloud (optional; required for cloud endpoint auth).
+            phoenix_endpoint: Phoenix collector endpoint (e.g., http://localhost:6006/v1/traces).
+            project_name: Phoenix project name (default: "evaluating-agent").
         """
         self.ollama_url = ollama_url or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.two_stage_cot = bool(two_stage_cot)
@@ -828,6 +843,8 @@ class SalesDataAgent:
         Args:
             prompt: Natural-language request or question.
             visualization_goal: Optional explicit goal for charts; defaults to the prompt.
+            lookup_only: If True, only execute the lookup step (no analysis/visualization).
+            no_vis: If True, run lookup + analysis but skip visualization generation.
 
         Returns:
             The final state dictionary produced by the compiled graph execution.
@@ -1149,7 +1166,38 @@ class SalesDataAgent:
         llm_text_eval: bool = False,
         emit_viz_placeholders: bool = False,
     ) -> Dict:
-        
+        """Execute the agent for a single prompt with optional evaluation and best-of-n.
+
+        This is the main entry point used by notebooks, the CLI (`python -m Agent.data_agent`),
+        and the Flask API. It supports multiple execution modes (lookup-only, analysis-only,
+        full), optional best-of-n sampling, and optional evaluation hooks.
+
+        Notes:
+            - This function returns `(best_result, score_variance)` (even when `best_of_n=1`).
+            - If `enable_codecarbon=True`, a CodeCarbon emissions summary is added to `best_result["emissions"]`.
+
+        Args:
+            prompt: Natural-language request or question.
+            visualization_goal: Optional explicit goal for charts; defaults to the prompt.
+            lookup_only: If True, only execute the lookup step (no analysis/visualization).
+            no_vis: If True, run lookup + analysis but skip visualization generation.
+            best_of_n: Number of runs to execute and select the best by score (default: 1).
+            temp: Base temperature. If None, uses the agent's configured temperature.
+            temp_max: Optional max temperature for best-of-n; if set and best_of_n>1, temperatures
+                are linearly spaced between temp and temp_max.
+            csv_eval_fn: Optional callable to score the produced CSV data.
+            text_eval_fn: Optional callable to score the analysis text (BLEU/SPICE/LLM-judge, etc.).
+            gt_vis: Optional ground-truth visualization-spec dict for chart-config evaluation.
+            save_dir: Directory to write artifacts into (created if missing). If None, uses a temp dir.
+            enable_codecarbon: If True, track energy/emissions via CodeCarbon.
+            llm_text_eval: If True, include LLM-as-judge scoring when configured.
+            emit_viz_placeholders: If True, always include viz_spec_* keys in results (null if not applicable).
+
+        Returns:
+            A tuple `(best_result, score_variance)` where `best_result` is the selected run output
+            dictionary and `score_variance` summarizes spread across candidates (0..1).
+        """
+
         if save_dir is None:
             save_dir = tempfile.mkdtemp(prefix="agent_runs_")
         os.makedirs(save_dir, exist_ok=True)

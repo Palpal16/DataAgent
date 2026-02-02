@@ -12,47 +12,64 @@ agent = SalesDataAgent()
 
 @app.route('/call-agent', methods=['POST'])
 def call_agent():
-    """
-    API endpoint to call the SalesDataAgent.
+    """Run `SalesDataAgent` via HTTP.
 
-    POST body (JSON):
-    {
-        "prompt": "Show me sales in Nov 2021",  # Required
-        "model": "llama3.2:3b",  # Optional
-        "data_path": "/path/to/data.parquet",  # Optional
-        "visualization_goal": "Create a bar chart",  # Optional
-        "lookup_only": false,  # Optional
-        "no_vis": false,  # Optional (run without visualization)
-        "best_of_n": 1,  # Optional
-        "temp": 0.1,  # Optional (base temperature)
-        "temp_max": 0.5,  # Optional (max temperature for best-of-n)
-        "save_dir": "/path/to/save",  # Optional
-        "enable_codecarbon": false,  # Optional
+    This endpoint executes a single prompt and optionally evaluates results (CSV IoU and/or
+    text metrics). It returns the full agent result plus a few convenience fields.
 
-        # Ground truth for evaluation
-        "dataset": "/path/to/dataset.json",  # Optional (auto-generate gt files)
-        "gt_csv": "/path/to/ground_truth.csv",  # Optional
-        "gt_text": "/path/to/ground_truth.txt",  # Optional
+    Request JSON (minimal):
+        {
+          "prompt": "Show me sales in Nov 2021"
+        }
 
-        # Evaluation options
-        "py_csv_eval": false,  # Use Python CSV evaluator
-        "cpp_csv_eval": false,  # Use C++ CSV evaluator
-        "evaluator_exe": "/path/to/evaluator",  # C++ evaluator path
-        "eval_keys": "col1,col2",  # Keys for C++ evaluator
-        "iou_type": "rows",  # "rows", "columns", or "table"
+    Common options:
+        - "model": str (e.g. "llama3.2:3b", "openai:gpt-4o-mini", "anthropic:claude-3-5-sonnet-latest")
+        - "visualization_goal": str
+        - "lookup_only": bool  (only lookup)
+        - "no_vis": bool       (lookup + analysis, no visualization)
+        - "best_of_n": int
+        - "temp": float
+        - "temp_max": float
+        - "save_dir": str
+        - "enable_codecarbon": bool
 
-        "bleu_text_eval": false,  # Use BLEU for text evaluation
-        "spice_text_eval": false,  # Use SPICE for text evaluation
-        "llm_text_eval": false,  # Use LLM for text evaluation
-        "bleu_nltk": false,  # Use NLTK BLEU instead of simple
-        "spice_jar": "/path/to/spice.jar",  # SPICE jar path
-        "spice_java_bin": "java",  # Java binary for SPICE
+    Evaluation options (optional):
+        - "dataset": str (JSON dataset; auto-generates gt files into save_dir)
+        - "gt_csv": str
+        - "gt_text": str
+        - "py_csv_eval": bool
+        - "cpp_csv_eval": bool
+        - "evaluator_exe": str
+        - "eval_keys": str
+        - "iou_type": "rows" | "columns" | "table"
+        - "bleu_text_eval": bool
+        - "spice_text_eval": bool
+        - "llm_text_eval": bool
+        - "bleu_nltk": bool
+        - "spice_jar": str
+        - "spice_java_bin": str
 
-        # Phoenix tracing
-        "enable_tracing": false,
-        "phoenix_endpoint": "http://localhost:6006/v1/traces",
-        "project_name": "evaluating-agent"
-    }
+    Tracing options (optional):
+        - "enable_tracing": bool
+        - "phoenix_endpoint": str
+        - "project_name": str
+
+    Response (success, HTTP 200):
+        {
+          "status": "success",
+          "result": { ...full agent output... },
+          "save_dir": "...",
+          "csv_score": 0.0-1.0,         # if enabled
+          "text_score": 0.0-1.0,        # if enabled
+          "score_variance": 0.0-1.0,    # if best_of_n>1
+          "answer": [...],             # convenience alias for result.answer
+          "data_preview": "...",
+          "sql_query": "..."
+        }
+
+    Response (error):
+        - HTTP 400 for invalid payload / evaluation configuration
+        - HTTP 500 for runtime errors (LLM/tool failures)
     """
     payload = request.get_json(silent=True) or {}
 
@@ -220,7 +237,12 @@ def call_agent():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint."""
+    """Health check endpoint.
+
+    Returns:
+        200 JSON with a simple status and the default model name.
+        503 JSON if the agent cannot be initialized.
+    """
     try:
         # Check if agent can be initialized
         test_agent = SalesDataAgent()
@@ -230,7 +252,14 @@ def health():
 
 @app.route('/models', methods=['GET'])
 def list_models():
-    """List available Ollama models."""
+    """List available Ollama models from the configured Ollama host.
+
+    Reads `OLLAMA_HOST` (default: http://localhost:11434) and calls `/api/tags`.
+
+    Returns:
+        200 JSON: {"models": ["llama3.2:3b", ...]}
+        500 JSON on errors.
+    """
     try:
         import requests
         ollama_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
