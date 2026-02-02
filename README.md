@@ -1,4 +1,7 @@
-## LLM-Powered Data Analysis System: An Accuracy-Focused Evaluation of Open Source Models
+## Development and evaluation of AI
+agentic workflows in LangGraph:
+an energy and computational per-
+formance analysis of DataAgen
 
 <p align="center">
   <img src="Report/Images/Workflow.png" width="1000" alt="DataAgent system workflow" />
