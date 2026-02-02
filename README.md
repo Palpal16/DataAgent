@@ -525,7 +525,23 @@ SPICE is a **semantic scene-graph** metric originally designed for **image capti
 
 ### Prerequisites
 - **Java** installed (`java -version`)
-- A SPICE jar file (e.g., `spice-1.0.jar`) downloaded from the official repo(https://panderson.me/spice/).
+- A SPICE jar file (e.g., `spice-1.0.jar`) downloaded from the official SPICE page: `https://panderson.me/spice/`.
+
+### Stanford CoreNLP dependency (required by SPICE)
+SPICE relies on Stanford CoreNLP. If you download SPICE without bundled CoreNLP jars (common), install them like this:
+
+1) Download **Stanford CoreNLP 3.6.0** from the CoreNLP release history:
+`https://stanfordnlp.github.io/CoreNLP/history.html`
+
+2) From the downloaded CoreNLP archive, copy at least these jars into your SPICE folder:
+- `stanford-corenlp-3.6.0.jar`
+- `stanford-corenlp-3.6.0-models.jar`
+
+Recommended destination:
+- `SPICE-1.0/lib/` (next to `spice-1.0.jar`)
+
+Notes:
+- `*-sources.jar` and `*-javadoc.jar` are optional (not needed at runtime).
 
 ### Config runner example (analysis + SPICE)
 ```yaml
