@@ -1,6 +1,3 @@
-# NOTE: intentionally no `# syntax=` directive here to avoid pulling
-# `docker.io/docker/dockerfile:*` on restricted networks.
-#
 # Docker image to run the C++ config runner (agent_config_runner) for experiments/sweeps.
 # It builds the C++ binaries inside the container and installs Python dependencies for the agent.
 #

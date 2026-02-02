@@ -57,11 +57,7 @@ try:
 except Exception:  # pragma: no cover - tracing is optional
     StatusCode = None  # type: ignore
     _PHOENIX_AVAILABLE = False
-    #print exception
-    print(Exception)
 
-
-# Mirror utils_0.py printing of langgraph version
 import langgraph
 import langgraph.version
 print(langgraph.version)

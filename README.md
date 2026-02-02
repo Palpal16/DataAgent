@@ -21,7 +21,7 @@ An LLM-powered agent that queries a local parquet dataset with DuckDB, analyzes 
 python -m pip install -r requirements.txt
 ollama serve
 ollama pull llama3.2:3b
-python -m Agent.data_agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
+python -m Agent.data_agent "Show me the sales in October 2022"
 ```
 
 ---
@@ -34,6 +34,11 @@ python -m Agent.data_agent "Show me the sales in Nov 2021" --goal "Sales trend f
 Install Python deps (from the project root):
 ```powershell
 python -m pip install -r requirements.txt
+```
+
+Optional (only if you want to train/run the DistilBERT difficulty classifier):
+```powershell
+python -m pip install -r requirements-ml.txt
 ```
 
 ---
@@ -68,8 +73,8 @@ Edit `config/agent_config.yaml`, then run:
 
 Minimal example:
 ```yaml
-prompt: "Show me the sales in Nov 2021"
-visualization_goal: "Sales trend for Nov 2021"
+prompt: "Show me the sales in October 2022"
+visualization_goal: "Sales trend for October 2022"
 agent_mode: "full"
 save_dir: ./output
 ```
@@ -197,8 +202,8 @@ agent = SalesDataAgent(
 )
 
 result = agent.run(
-    "Show me the sales in Nov 2021",
-    visualization_goal="Sales trend for Nov 2021",
+    "Show me the sales in October 2022",
+    visualization_goal="Sales trend for October 2022",
 )
 
 print("Final tool:", result.get("tool_choice"))
@@ -222,7 +227,7 @@ Common examples:
 
 ```powershell
 # Full pipeline (lookup + analysis + visualization)
-python -m Agent.data_agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
+python -m Agent.data_agent "Show me the sales in October 2022"
 
 # Lookup-only (SQL + data table)
 python -m Agent.data_agent "Weekly sales in 2021" --lookup_only
@@ -374,13 +379,21 @@ docker build -f Dockerfile -t data-agent .
 
 Run (Docker Desktop on Windows/macOS):
 ```powershell
-docker run --rm -e OLLAMA_HOST=http://host.docker.internal:11434 `
-  data-agent "Show me the sales in Nov 2021" --goal "Sales trend for Nov 2021"
+docker run --rm -it -e OLLAMA_HOST=http://host.docker.internal:11434 `
+  data-agent "Show me the sales in October 2022"
+```
+
+If your setup still tries to call `http://localhost:11434` from inside the container, force the URL explicitly:
+```powershell
+docker run --rm -it `
+  -e OLLAMA_HOST="http://host.docker.internal:11434" `
+  data-agent "Show me the sales in October 2022" `
+  --ollama_url "http://host.docker.internal:11434"
 ```
 
 Run (Linux host, replace with your host IP or network alias):
 ```bash
-docker run --rm -e OLLAMA_HOST=http://192.168.1.10:11434 \
+docker run --rm -it -e OLLAMA_HOST=http://192.168.1.10:11434 \
   data-agent "Top products by revenue"
 ```
 
@@ -395,7 +408,7 @@ Override the entrypoint (run any Python you want inside the image):
 ```powershell
 docker run --rm -it --entrypoint bash data-agent
 # inside the container:
-python -m Agent.data_agent "Top products by revenue" --goal "Top-5"
+python -m Agent.data_agent "Top products by revenue"
 ```
 
 Notes:
@@ -476,7 +489,7 @@ To perform load testing and performance analysis, you may want to use Apache JMe
 ## Configuration
 - Change model: pass `model="<name>"` to `SalesDataAgent(...)`.
 - Custom parquet: pass `data_path="..."` in the constructor, or use `--data` in CLI.
-- Visualization goal: pass `visualization_goal="..."` to `run()` or `--goal` in CLI.
+- Visualization goal (optional): pass `visualization_goal="..."` to `run()`.
 
 ### LLM provider configuration (models)
 - **Ollama (default)**: `--model "llama3.2:3b"` (requires Ollama running; can override host with `OLLAMA_HOST`)
@@ -501,7 +514,7 @@ python agent_api.py
 Call the agent (example: lookup-only, best-of-n, save CSV, compare IoU):
 ```powershell
 $body = @{
-  prompt = "What were the sales in November 2021?"
+  prompt = "What were the sales in October 2022?"
   lookup_only = $true
   best_of_n = 5
   best_of_n_temp_min = 0.0
@@ -545,7 +558,7 @@ Notes:
 
 ### Config runner example (analysis + SPICE)
 ```yaml
-prompt: "What were the sum of sales in November 2021?"
+prompt: "What were the sum of sales in October 2022?"
 agent_mode: "analysis"
 save_dir: ./output
 gt_text: "./results/expected_analysis.txt"
@@ -559,7 +572,7 @@ spice:
 ### API example (SPICE)
 ```json
 {
-  "prompt": "What were the sum of sales in November 2021?",
+  "prompt": "What were the sum of sales in October 2022?",
   "analyze_only": true,
   "expected_analysis": "…ground truth…",
   "analysis_metric": "spice",
