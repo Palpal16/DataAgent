@@ -662,7 +662,11 @@ The plots in `results/` are generated from controlled sweeps over **test-time co
 ### Text quality by difficulty (BLEU vs SPICE)
 
 <p align="center">
-  <img src="results/bleu_spice_difficulty_best_of_n.png" width="500" alt="BLEU and SPICE by difficulty and best-of-n" />
+  <img src="results/bleu_spice_difficulty_best_of_n_two_stage_cot_False.png" width="800" alt="BLEU and SPICE by difficulty and best-of-n (two-stage CoT = False)" />
+</p>
+
+<p align="center">
+  <img src="results/bleu_spice_difficulty_best_of_n_two_stage_cot_True.png" width="800" alt="BLEU and SPICE by difficulty and best-of-n (two-stage CoT = True)" />
 </p>
 
 ### Cost by difficulty (end-to-end duration)
